@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { TOKEN_COOKIE } from "@/lib/api-client";
+import { normalizeAuthToken } from "@/lib/auth-cookie";
 
 function decodeJwtPayload(token: string): Record<string, unknown> | null {
   try {
@@ -17,7 +18,7 @@ function decodeJwtPayload(token: string): Record<string, unknown> | null {
 }
 
 export async function middleware(request: NextRequest) {
-  const token = request.cookies.get(TOKEN_COOKIE)?.value;
+  const token = normalizeAuthToken(request.cookies.get(TOKEN_COOKIE)?.value);
   const path = request.nextUrl.pathname;
 
   if (path.startsWith("/admin")) {

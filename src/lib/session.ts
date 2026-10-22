@@ -81,8 +81,12 @@ export async function fetchMe(
     method: "GET",
     token: t,
   });
-  if (!res.ok || !res.data?.user) {
+  // Only wipe local session on auth failure — not on transient network errors.
+  if (res.status === 401 || res.status === 403) {
     clearSession();
+    return null;
+  }
+  if (!res.ok || !res.data?.user) {
     return null;
   }
   try {

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { BidderAuthShell } from "@/components/auth/bidder-auth-shell";
 import { Button } from "@/components/ui/button";
@@ -17,7 +17,6 @@ export default function LoginForm() {
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
-  const router = useRouter();
   const searchParams = useSearchParams();
   const redirect = searchParams.get("redirect") ?? "/";
 
@@ -37,8 +36,9 @@ export default function LoginForm() {
 
     const destination = isStaffRole(result.user.role) ? "/admin" : redirect;
 
-    router.push(destination);
-    router.refresh();
+    // Hard navigation so the Set-Cookie from /api/auth/login is always sent
+    // to middleware / SSR on the next page (soft router.push can race).
+    window.location.assign(destination);
   }
 
   return (

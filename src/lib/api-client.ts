@@ -1,4 +1,10 @@
-export const TOKEN_COOKIE = "lelang_token";
+import {
+  normalizeAuthToken,
+  TOKEN_COOKIE,
+  TOKEN_MAX_AGE_SEC,
+} from "@/lib/auth-cookie";
+
+export { TOKEN_COOKIE };
 export const TOKEN_STORAGE_KEY = "lelang_token";
 
 /** Absolute BE URL (server / proxy / photos). Always from env. */
@@ -69,6 +75,8 @@ export async function apiFetch<T = unknown>(
       method: options.method ?? (body ? "POST" : "GET"),
       headers,
       body,
+      // Ensure Set-Cookie from same-origin auth routes is accepted.
+      credentials: "same-origin",
       cache: options.cache,
       next: options.next,
       signal: options.signal,
@@ -113,10 +121,19 @@ export async function getServerToken(): Promise<string | null> {
   try {
     const { cookies } = await import("next/headers");
     const jar = await cookies();
-    return jar.get(TOKEN_COOKIE)?.value ?? null;
+    return normalizeAuthToken(jar.get(TOKEN_COOKIE)?.value);
   } catch {
     return null;
   }
+}
+
+function readBrowserCookie(name: string): string | null {
+  if (typeof document === "undefined") return null;
+  const match = document.cookie
+    .split("; ")
+    .find((row) => row.startsWith(`${name}=`));
+  if (!match) return null;
+  return normalizeAuthToken(match.slice(name.length + 1));
 }
 
 /** Server-side fetch with Authorization from cookie when available. */
@@ -132,10 +149,12 @@ export async function apiFetchServer<T = unknown>(
 export function getClientToken(): string | null {
   if (typeof window === "undefined") return null;
   try {
-    return localStorage.getItem(TOKEN_STORAGE_KEY);
+    const fromStorage = localStorage.getItem(TOKEN_STORAGE_KEY);
+    if (fromStorage) return fromStorage;
   } catch {
-    return null;
+    // ignore
   }
+  return readBrowserCookie(TOKEN_COOKIE);
 }
 
 export function setClientToken(token: string): void {
@@ -145,7 +164,9 @@ export function setClientToken(token: string): void {
   } catch {
     // ignore
   }
-  document.cookie = `${TOKEN_COOKIE}=${encodeURIComponent(token)}; path=/; max-age=${60 * 60 * 24 * 7}; SameSite=Lax`;
+  // Mirror cookie for middleware/SSR (login API also Set-Cookie).
+  const secure = window.location.protocol === "https:" ? "; Secure" : "";
+  document.cookie = `${TOKEN_COOKIE}=${token}; Path=/; Max-Age=${TOKEN_MAX_AGE_SEC}; SameSite=Lax${secure}`;
 }
 
 export function clearClientToken(): void {
@@ -155,7 +176,11 @@ export function clearClientToken(): void {
   } catch {
     // ignore
   }
-  document.cookie = `${TOKEN_COOKIE}=; path=/; max-age=0; SameSite=Lax`;
+  const secure = window.location.protocol === "https:" ? "; Secure" : "";
+  document.cookie = `${TOKEN_COOKIE}=; Path=/; Max-Age=0; SameSite=Lax${secure}`;
+  void fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" }).catch(
+    () => undefined
+  );
 }
 
 export function photoProxyUrl(storagePath: string): string {

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getBackendBase, TOKEN_COOKIE } from "@/lib/api-client";
+import { normalizeAuthToken } from "@/lib/auth-cookie";
 
 /** Proxy a Next.js route handler request to lelang-be. */
 export async function proxyToBackend(
@@ -10,9 +11,10 @@ export async function proxyToBackend(
   const base = getBackendBase();
   const url = `${base}${bePath.startsWith("/") ? bePath : `/${bePath}`}`;
   const token =
-    request.cookies.get(TOKEN_COOKIE)?.value ||
-    request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ||
-    null;
+    normalizeAuthToken(request.cookies.get(TOKEN_COOKIE)?.value) ||
+    normalizeAuthToken(
+      request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") || null
+    );
 
   const headers = new Headers();
   if (token) headers.set("Authorization", `Bearer ${token}`);
