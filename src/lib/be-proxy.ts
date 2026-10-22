@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getApiBase, TOKEN_COOKIE } from "@/lib/api-client";
+import { getBackendBase, TOKEN_COOKIE } from "@/lib/api-client";
 
 /** Proxy a Next.js route handler request to lelang-be. */
 export async function proxyToBackend(
@@ -7,7 +7,7 @@ export async function proxyToBackend(
   bePath: string,
   init?: { method?: string; body?: BodyInit | null; formData?: boolean }
 ) {
-  const base = getApiBase();
+  const base = getBackendBase();
   const url = `${base}${bePath.startsWith("/") ? bePath : `/${bePath}`}`;
   const token =
     request.cookies.get(TOKEN_COOKIE)?.value ||

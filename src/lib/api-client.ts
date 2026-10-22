@@ -1,11 +1,23 @@
 export const TOKEN_COOKIE = "lelang_token";
 export const TOKEN_STORAGE_KEY = "lelang_token";
 
-export function getApiBase(): string {
+/** Absolute BE URL (server / proxy / photos). Always from env. */
+export function getBackendBase(): string {
   return (process.env.NEXT_PUBLIC_API_URL || "http://localhost:4100").replace(
     /\/$/,
     ""
   );
+}
+
+/**
+ * Base for API calls.
+ * Browser uses same-origin (`""`) so Next can rewrite/proxy to BE and avoid CORS
+ * when FE and BE are on different hosts (e.g. Coolify).
+ * Server always hits BE directly.
+ */
+export function getApiBase(): string {
+  if (typeof window !== "undefined") return "";
+  return getBackendBase();
 }
 
 export type ApiFetchOptions = {

@@ -13,6 +13,8 @@ try {
   // keep defaults
 }
 
+const backendOrigin = apiUrl.replace(/\/$/, "");
+
 const nextConfig: NextConfig = {
   images: {
     remotePatterns: [
@@ -23,6 +25,17 @@ const nextConfig: NextConfig = {
         pathname: "/api/files/**",
       },
     ],
+  },
+  // Browser calls /api/* same-origin; unmatched paths proxy to BE (avoids CORS).
+  async rewrites() {
+    return {
+      fallback: [
+        {
+          source: "/api/:path*",
+          destination: `${backendOrigin}/api/:path*`,
+        },
+      ],
+    };
   },
 };
 

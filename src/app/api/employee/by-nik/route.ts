@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getApiBase } from "@/lib/api-client";
+import { getBackendBase } from "@/lib/api-client";
 
 /**
  * Keep FE query param `nomor_induk` working while BE expects `nik`.
@@ -21,7 +21,7 @@ export async function GET(request: NextRequest) {
 
   try {
     const upstream = await fetch(
-      `${getApiBase()}/api/employee/by-nik?nik=${encodeURIComponent(nik)}`
+      `${getBackendBase()}/api/employee/by-nik?nik=${encodeURIComponent(nik)}`
     );
     const text = await upstream.text();
     let data: Record<string, unknown> = {};
