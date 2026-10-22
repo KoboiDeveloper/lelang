@@ -1,15 +1,24 @@
-import { createClient } from "@/lib/supabase/server";
+import { apiFetchServer } from "@/lib/api-client";
 import { Navbar } from "@/components/navbar";
 import { Footer } from "@/components/footer";
 import { LotsGrid } from "@/components/lots-grid";
 import { CompanySwitcher } from "@/components/home/company-switcher";
 import { StripedHeroBackground } from "@/components/striped-hero-background";
-import { AuctionItem, ItemPhoto } from "@/lib/database.types";
+import { AuctionItem, AuctionPeriod, ItemPhoto } from "@/lib/database.types";
 import {
   fetchCompaniesWithAuction,
   fetchCompanyByCode,
   resolveCompanyCode,
 } from "@/lib/companies";
+
+type PeriodsResponse = { periods: Pick<AuctionPeriod, "id">[] };
+type ItemsPageResponse = {
+  items: {
+    item: AuctionItem;
+    photos: ItemPhoto[];
+    bidCount: number;
+  }[];
+};
 
 export default async function LotsPage({
   searchParams,
@@ -34,48 +43,25 @@ export default async function LotsPage({
     );
   }
 
-  const supabase = await createClient();
+  const periodsRes = await apiFetchServer<PeriodsResponse>(
+    `/api/catalog/periods?company_id=${encodeURIComponent(company.id)}`,
+    { method: "GET", next: { revalidate: 30 } }
+  );
+  const periodIds = (periodsRes.data?.periods ?? []).map((p) => p.id);
 
-  const { data: periods } = await supabase
-    .from("auction_periods")
-    .select("id")
-    .eq("company_id", company.id);
-  const periodIds = (periods ?? []).map((period) => period.id);
+  const pages = await Promise.all(
+    periodIds.map((periodId) =>
+      apiFetchServer<ItemsPageResponse>(
+        `/api/items?period_id=${encodeURIComponent(periodId)}&offset=0&limit=500`,
+        { method: "GET", next: { revalidate: 30 } }
+      )
+    )
+  );
 
-  const { data: items } = periodIds.length
-    ? await supabase
-        .from("auction_items")
-        .select("*")
-        .in("period_id", periodIds)
-        .in("status", ["active", "ready", "sold"])
-        .order("lot_number")
-    : { data: [] as AuctionItem[] };
-
-  const itemIds = (items ?? []).map((item) => item.id);
-  const [{ data: photos }, { data: bidCountRows }] = itemIds.length
-    ? await Promise.all([
-        supabase
-          .from("item_photos")
-          .select("*")
-          .in("item_id", itemIds)
-          .order("sort_order"),
-        supabase.rpc("get_item_bid_counts", { p_item_ids: itemIds }),
-      ])
-    : [
-        { data: [] as ItemPhoto[] },
-        { data: [] as { item_id: string; bid_count: number }[] },
-      ];
-
-  const bidCounts: Record<string, number> = {};
-  for (const row of bidCountRows ?? []) {
-    bidCounts[row.item_id] = Number(row.bid_count ?? 0);
-  }
-
-  const itemsWithPhotos = (items ?? []).map((item: AuctionItem) => ({
-    item,
-    photos: (photos ?? []).filter((photo) => photo.item_id === item.id),
-    bidCount: bidCounts[item.id] ?? 0,
-  }));
+  const itemsWithPhotos = pages
+    .flatMap((page) => page.data?.items ?? [])
+    .filter((row) => ["active", "ready", "sold"].includes(row.item.status))
+    .sort((a, b) => a.item.lot_number.localeCompare(b.item.lot_number));
 
   return (
     <div className="flex min-h-screen flex-col">

@@ -1,4 +1,4 @@
-import Image from "next/image";
+import { PhotoImage } from "@/components/photo-image";
 import Link from "next/link";
 import { AuctionPeriod, BankAccountWithBank, Company } from "@/lib/database.types";
 import { WinnerRow } from "@/lib/winners";
@@ -132,7 +132,7 @@ function WinnerRowsTable({ rows }: { rows: WinnerRow[] }) {
               <div className="hidden items-center gap-4 px-5 py-4 lg:grid lg:grid-cols-[72px_1fr_120px_140px_140px]">
                 <div className="relative h-14 w-14 overflow-hidden rounded-xl bg-slate-100">
                   {row.photoPath ? (
-                    <Image
+                    <PhotoImage
                       src={getPhotoUrl(row.photoPath)}
                       alt={row.itemName}
                       fill
@@ -178,7 +178,7 @@ function WinnerRowsTable({ rows }: { rows: WinnerRow[] }) {
               <div className="flex gap-3 p-4 lg:hidden">
                 <div className="relative h-16 w-16 shrink-0 overflow-hidden rounded-xl bg-slate-100">
                   {row.photoPath ? (
-                    <Image
+                    <PhotoImage
                       src={getPhotoUrl(row.photoPath)}
                       alt={row.itemName}
                       fill

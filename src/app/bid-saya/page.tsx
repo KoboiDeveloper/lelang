@@ -3,7 +3,8 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { createClient } from "@/lib/supabase/client";
+import { apiFetch, getClientToken } from "@/lib/api-client";
+import { getToken } from "@/lib/session";
 import { Navbar } from "@/components/navbar";
 import { Footer } from "@/components/footer";
 import { Badge } from "@/components/ui/badge";
@@ -146,7 +147,6 @@ export default function BidSayaPage() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [periodFilter, setPeriodFilter] = useState<string>("all");
   const router = useRouter();
-  const supabase = useMemo(() => createClient(), []);
 
   const periodOptions = useMemo(() => {
     const map = new Map<string, string>();
@@ -243,69 +243,45 @@ export default function BidSayaPage() {
 
   useEffect(() => {
     async function load() {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-
-      if (!user) {
+      const token = getToken() ?? getClientToken();
+      if (!token) {
         router.replace("/login?redirect=/bid-saya");
         return;
       }
 
-      const { data: bidder } = await supabase
-        .from("bidder_profiles")
-        .select("id")
-        .eq("auth_user_id", user.id)
-        .maybeSingle();
+      const res = await apiFetch<{ bids: unknown[] }>("/api/bidder/bids", {
+        method: "GET",
+        token,
+      });
 
-      if (!bidder) {
-        setLoading(false);
-        return;
-      }
-
-      const { data: bidData } = await supabase
-        .from("bids")
-        .select("id, amount, status, created_at, item_id")
-        .eq("bidder_id", bidder.id)
-        .order("created_at", { ascending: false });
-
-      const allBids = bidData ?? [];
-
-      if (allBids.length === 0) {
+      if (!res.ok) {
+        if (res.status === 401) {
+          router.replace("/login?redirect=/bid-saya");
+          return;
+        }
         setBids([]);
         setLoading(false);
         return;
       }
 
-      const itemIds = [...new Set(allBids.map((bid) => bid.item_id))];
-      const { data: itemData } = await supabase
-        .from("auction_items")
-        .select(
-          "id, lot_number, item_name, starting_price, current_price, period_id"
-        )
-        .in("id", itemIds);
+      const rawBids = res.data?.bids ?? [];
+      if (rawBids.length === 0) {
+        setBids([]);
+        setLoading(false);
+        return;
+      }
 
-      const periodIds = [
-        ...new Set((itemData ?? []).map((item) => item.period_id)),
-      ];
-      const { data: periodData } = periodIds.length
-        ? await supabase
-            .from("auction_periods")
-            .select("id, status, code")
-            .in("id", periodIds)
-        : { data: [] as { id: string; status: string; code: string }[] };
-
-      const periodById = new Map(
-        (periodData ?? []).map((period) => [period.id, period])
-      );
-
-      const visibleItemIds = new Set<string>();
+      const allBids: MyBid[] = [];
       const map: Record<string, ItemInfo> = {};
+      const visibleItemIds = new Set<string>();
 
-      for (const item of itemData ?? []) {
-        const period = periodById.get(item.period_id);
-        const periodStatus = period?.status ?? "";
-        // Tampilkan periode aktif + finished agar barang menang tetap terlihat.
+      for (const entry of rawBids) {
+        const b = entry as Record<string, unknown>;
+        const item = b.item as Record<string, unknown> | undefined;
+        const period = item?.period as Record<string, unknown> | undefined;
+
+        const itemId = String(b.itemId ?? b.item_id ?? item?.id ?? "");
+        const periodStatus = String(period?.status ?? "");
         if (
           periodStatus === "cancelled" ||
           periodStatus === "archived" ||
@@ -314,17 +290,29 @@ export default function BidSayaPage() {
           continue;
         }
 
-        visibleItemIds.add(item.id);
-        map[item.id] = {
-          id: item.id,
-          lot_number: item.lot_number,
-          item_name: item.item_name,
-          starting_price: item.starting_price,
-          current_price: item.current_price,
-          period_id: item.period_id,
-          period_code: period?.code ?? "—",
-          period_status: periodStatus,
-        };
+        allBids.push({
+          id: String(b.id),
+          amount: Number(b.amount),
+          status: String(b.status),
+          created_at: String(b.createdAt ?? b.created_at ?? ""),
+          item_id: itemId,
+        });
+
+        if (item && itemId) {
+          visibleItemIds.add(itemId);
+          map[itemId] = {
+            id: itemId,
+            lot_number: String(item.lotNumber ?? item.lot_number ?? ""),
+            item_name: String(item.itemName ?? item.item_name ?? ""),
+            starting_price: Number(item.startingPrice ?? item.starting_price ?? 0),
+            current_price: Number(item.currentPrice ?? item.current_price ?? 0),
+            period_id: String(
+              item.periodId ?? item.period_id ?? period?.id ?? ""
+            ),
+            period_code: String(period?.code ?? "—"),
+            period_status: periodStatus,
+          };
+        }
       }
 
       setBids(allBids.filter((bid) => visibleItemIds.has(bid.item_id)));
@@ -333,7 +321,7 @@ export default function BidSayaPage() {
     }
 
     void load();
-  }, [supabase, router]);
+  }, [router]);
 
   return (
     <div className="flex min-h-screen flex-col">

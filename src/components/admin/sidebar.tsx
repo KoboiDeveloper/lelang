@@ -13,10 +13,10 @@ import {
   Trophy,
   UserCircle,
 } from "lucide-react";
-import { createClient } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
 import { Profile, UserRole } from "@/lib/database.types";
 import { ACCOUNTING_ROLES } from "@/lib/roles";
+import { clearSession } from "@/lib/session";
 
 const navItems: {
   href: string;
@@ -49,10 +49,9 @@ export function AdminSidebar({
 }) {
   const pathname = usePathname();
   const router = useRouter();
-  const supabase = createClient();
 
   async function handleLogout() {
-    await supabase.auth.signOut();
+    clearSession();
     router.push("/login");
     router.refresh();
   }

@@ -1,11 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import Image from "next/image";
+import { useCallback, useEffect, useState } from "react";
+import { PhotoImage } from "@/components/photo-image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Heart, Loader2, Package, X } from "lucide-react";
-import { createClient } from "@/lib/supabase/client";
+import { apiFetch, getClientToken } from "@/lib/api-client";
+import { getStoredUser, onAuthChange } from "@/lib/session";
 import { onFavoritesChanged, notifyFavoritesChanged } from "@/lib/favorite-events";
 import { formatRupiah, getPhotoUrl } from "@/lib/format";
 import { Button } from "@/components/ui/button";
@@ -26,9 +27,47 @@ type FavoriteItemRow = {
   } | null;
 };
 
+function mapFavorites(raw: unknown[]): FavoriteItemRow[] {
+  return raw.map((entry) => {
+    const f = entry as Record<string, unknown>;
+    const item = (f.item ?? f.auction_items) as Record<string, unknown> | null;
+    const photosRaw =
+      (item?.photos as unknown[]) ??
+      (item?.item_photos as unknown[]) ??
+      [];
+    const photos = (photosRaw as Record<string, unknown>[]).map((p) => ({
+      storage_path: String(p.storage_path ?? p.storagePath ?? ""),
+      sort_order: Number(p.sort_order ?? p.sortOrder ?? 0),
+    }));
+
+    const currentPrice = item
+      ? Number(
+          (item.current_price as number | undefined) ??
+            (item.currentPrice as number | undefined) ??
+            0
+        )
+      : 0;
+
+    return {
+      id: String(f.id),
+      item_id: String(f.item_id ?? f.itemId ?? item?.id ?? ""),
+      created_at: String(f.created_at ?? f.createdAt ?? ""),
+      auction_items: item
+        ? {
+            id: String(item.id),
+            lot_number: String(item.lot_number ?? item.lotNumber ?? ""),
+            item_name: String(item.item_name ?? item.itemName ?? ""),
+            current_price: currentPrice,
+            status: String(item.status ?? ""),
+            item_photos: photos,
+          }
+        : null,
+    };
+  });
+}
+
 export function FavoritesMenu({ className }: { className?: string }) {
   const pathname = usePathname();
-  const supabase = useMemo(() => createClient(), []);
   const [open, setOpen] = useState(false);
   const [userId, setUserId] = useState<string | null>(null);
   const [authReady, setAuthReady] = useState(false);
@@ -39,58 +78,38 @@ export function FavoritesMenu({ className }: { className?: string }) {
   const count = rows.length;
 
   const loadFavorites = useCallback(async () => {
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    if (!user) {
+    const token = getClientToken();
+    const stored = getStoredUser();
+    if (!token || !stored) {
       setUserId(null);
       setRows([]);
       setAuthReady(true);
       return;
     }
 
-    setUserId(user.id);
+    setUserId(stored.id);
     setLoading(true);
-    const { data, error } = await supabase
-      .from("favorites")
-      .select(
-        `
-        id,
-        item_id,
-        created_at,
-        auction_items (
-          id,
-          lot_number,
-          item_name,
-          current_price,
-          status,
-          item_photos ( storage_path, sort_order )
-        )
-      `
-      )
-      .eq("user_id", user.id)
-      .order("created_at", { ascending: false })
-      .limit(30);
+    const res = await apiFetch<{ favorites: unknown[] }>("/api/catalog/favorites", {
+      method: "GET",
+      token,
+    });
 
-    if (error) {
-      toast.error(error.message || "Gagal memuat favorit");
+    if (!res.ok) {
+      toast.error(res.error || "Gagal memuat favorit");
       setRows([]);
     } else {
-      setRows((data ?? []) as unknown as FavoriteItemRow[]);
+      setRows(mapFavorites(res.data?.favorites ?? []));
     }
     setLoading(false);
     setAuthReady(true);
-  }, [supabase]);
+  }, []);
 
   useEffect(() => {
     void loadFavorites();
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange(() => {
+    return onAuthChange(() => {
       void loadFavorites();
     });
-    return () => subscription.unsubscribe();
-  }, [loadFavorites, supabase]);
+  }, [loadFavorites]);
 
   useEffect(() => {
     return onFavoritesChanged(() => {
@@ -102,18 +121,18 @@ export function FavoritesMenu({ className }: { className?: string }) {
     setOpen(false);
   }, [pathname]);
 
-  async function removeFavorite(favoriteId: string) {
-    if (!userId) return;
-    const { error } = await supabase
-      .from("favorites")
-      .delete()
-      .eq("id", favoriteId)
-      .eq("user_id", userId);
-    if (error) {
-      toast.error(error.message || "Gagal menghapus favorit");
+  async function removeFavorite(itemId: string) {
+    const token = getClientToken();
+    if (!userId || !token) return;
+    const res = await apiFetch(`/api/catalog/favorites/${itemId}`, {
+      method: "DELETE",
+      token,
+    });
+    if (!res.ok) {
+      toast.error(res.error || "Gagal menghapus favorit");
       return;
     }
-    setRows((prev) => prev.filter((row) => row.id !== favoriteId));
+    setRows((prev) => prev.filter((row) => row.item_id !== itemId));
     notifyFavoritesChanged();
     toast.success("Dihapus dari favorit");
   }
@@ -173,7 +192,7 @@ export function FavoritesMenu({ className }: { className?: string }) {
 
             <div className="max-h-80 overflow-y-auto">
               {loading ? (
-                <div className="flex items-center justify-center gap-2 py-10 text-sm text-slate-500">
+                <div className="flex items-center gap-2 justify-center py-10 text-sm text-slate-500">
                   <Loader2 className="h-4 w-4 animate-spin" />
                   Memuat...
                 </div>
@@ -203,7 +222,7 @@ export function FavoritesMenu({ className }: { className?: string }) {
                         >
                           <div className="relative h-12 w-12 shrink-0 overflow-hidden rounded-lg bg-slate-100">
                             {thumb ? (
-                              <Image
+                              <PhotoImage
                                 src={getPhotoUrl(thumb)}
                                 alt={item.item_name}
                                 fill
@@ -230,7 +249,7 @@ export function FavoritesMenu({ className }: { className?: string }) {
                         </Link>
                         <button
                           type="button"
-                          onClick={() => void removeFavorite(row.id)}
+                          onClick={() => void removeFavorite(row.item_id)}
                           className="mt-1 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-400 hover:bg-rose-50 hover:text-rose-600"
                           aria-label="Hapus favorit"
                           title="Hapus"

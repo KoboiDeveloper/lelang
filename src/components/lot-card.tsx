@@ -1,8 +1,8 @@
 import Link from "next/link";
-import Image from "next/image";
 import { AuctionItem, ItemPhoto } from "@/lib/database.types";
 import { formatRupiah, getPhotoUrl } from "@/lib/format";
 import { lotDetailHref } from "@/lib/lot-href";
+import { PhotoImage } from "@/components/photo-image";
 import { Gavel } from "lucide-react";
 
 export function LotCard({
@@ -33,7 +33,7 @@ export function LotCard({
       <article className="overflow-hidden rounded-xl border border-[var(--border)] bg-white shadow-sm transition-shadow hover:shadow-md sm:rounded-2xl">
         <div className="relative aspect-square overflow-hidden bg-slate-100 sm:aspect-[4/3]">
           {photo ? (
-            <Image
+            <PhotoImage
               src={getPhotoUrl(photo.storage_path)}
               alt={item.item_name}
               fill

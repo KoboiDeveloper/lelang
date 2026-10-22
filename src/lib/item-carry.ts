@@ -1,8 +1,6 @@
-import type { SupabaseClient } from "@supabase/supabase-js";
-import type { AuctionItem, Database } from "@/lib/database.types";
+import { apiFetch, getClientToken } from "@/lib/api-client";
+import type { AuctionItem, AuctionPeriod, ItemPhoto } from "@/lib/database.types";
 import { getPhotoUrl } from "@/lib/format";
-
-type AppSupabase = SupabaseClient<Database>;
 
 export type CarryUnbidResult = {
   sourcePeriodId: string;
@@ -11,75 +9,72 @@ export type CarryUnbidResult = {
   failed: number;
 };
 
+type PeriodsResponse = { periods: AuctionPeriod[] };
+type ItemsPageResponse = {
+  items: { item: AuctionItem; photos: ItemPhoto[]; bidCount: number }[];
+};
+
+function token() {
+  return getClientToken();
+}
+
 /** Cari periode sumber: finished terbaru di perusahaan yang sama. */
 export async function findCarrySourcePeriod(
-  supabase: AppSupabase,
   companyId: string
 ): Promise<{ id: string; code: string } | null> {
-  const { data } = await supabase
-    .from("auction_periods")
-    .select("id, code")
-    .eq("company_id", companyId)
-    .eq("status", "finished")
-    .order("end_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  return data;
+  const res = await apiFetch<PeriodsResponse>(
+    `/api/catalog/periods?company_id=${encodeURIComponent(companyId)}&status=finished`,
+    { method: "GET", token: token() }
+  );
+  const list = [...(res.data?.periods ?? [])].sort(
+    (a, b) => new Date(b.end_at).getTime() - new Date(a.end_at).getTime()
+  );
+  const source = list[0];
+  return source ? { id: source.id, code: source.code } : null;
 }
 
 export async function fetchUnbidItemsForPeriod(
-  supabase: AppSupabase,
   periodId: string
 ): Promise<AuctionItem[]> {
-  const { data: items } = await supabase
-    .from("auction_items")
-    .select("*")
-    .eq("period_id", periodId)
-    .in("status", ["active", "ready", "draft", "unsold"])
-    .order("lot_number");
-
-  const list = items ?? [];
-  if (list.length === 0) return [];
-
-  const { data: counts } = await supabase.rpc("get_item_bid_counts", {
-    p_item_ids: list.map((item) => item.id),
-  });
-
-  const bidCountByItem = new Map<string, number>();
-  for (const row of counts ?? []) {
-    bidCountByItem.set(row.item_id, Number(row.bid_count ?? 0));
-  }
-
-  return list.filter((item) => (bidCountByItem.get(item.id) ?? 0) === 0);
+  const res = await apiFetch<ItemsPageResponse>(
+    `/api/items?period_id=${encodeURIComponent(periodId)}&offset=0&limit=1000`,
+    { method: "GET", token: token() }
+  );
+  return (res.data?.items ?? [])
+    .filter((row) => (row.bidCount ?? 0) === 0)
+    .filter((row) =>
+      ["active", "ready", "draft", "unsold"].includes(row.item.status)
+    )
+    .map((row) => row.item);
 }
 
-async function copyItemPhotos(
-  supabase: AppSupabase,
-  sourceItemId: string,
-  targetItemId: string
-) {
-  const { data: sourcePhotos } = await supabase
-    .from("item_photos")
-    .select("*")
-    .eq("item_id", sourceItemId)
-    .order("sort_order");
+async function copyItemPhotos(sourceItemId: string, targetItemId: string) {
+  const detail = await apiFetch<{ photos: ItemPhoto[] }>(
+    `/api/items/${sourceItemId}`,
+    { method: "GET", token: token() }
+  );
+  const sourcePhotos = detail.data?.photos ?? [];
+  const t = token();
+  if (!t) return;
 
-  for (const photo of sourcePhotos ?? []) {
+  for (const photo of sourcePhotos) {
     try {
       const response = await fetch(getPhotoUrl(photo.storage_path));
       if (!response.ok) continue;
       const blob = await response.blob();
-      const path = `${targetItemId}/${Date.now()}-${photo.sort_order}.jpg`;
-      const { error: uploadError } = await supabase.storage
-        .from("auction-photos")
-        .upload(path, blob, { contentType: blob.type || "image/jpeg" });
-      if (uploadError) continue;
-
-      await supabase.from("item_photos").insert({
-        item_id: targetItemId,
-        storage_path: path,
-        sort_order: photo.sort_order,
+      const formData = new FormData();
+      formData.append(
+        "file",
+        new File([blob], `photo-${photo.sort_order}.jpg`, {
+          type: blob.type || "image/jpeg",
+        })
+      );
+      formData.append("item_id", targetItemId);
+      formData.append("sort_order", String(photo.sort_order));
+      await apiFetch("/api/files/upload", {
+        method: "POST",
+        token: t,
+        formData,
       });
     } catch {
       // Skip individual photo failures.
@@ -88,32 +83,31 @@ async function copyItemPhotos(
 }
 
 /** Duplikasi barang belum di-bid dari periode finished ke periode baru. */
-export async function carryUnbidItemsToPeriod(
-  supabase: AppSupabase,
-  {
-    companyId,
-    targetPeriodId,
-    sourcePeriodId,
-  }: {
-    companyId: string;
-    targetPeriodId: string;
-    sourcePeriodId?: string | null;
+export async function carryUnbidItemsToPeriod({
+  companyId,
+  targetPeriodId,
+  sourcePeriodId,
+}: {
+  companyId: string;
+  targetPeriodId: string;
+  sourcePeriodId?: string | null;
+}): Promise<CarryUnbidResult | null> {
+  let source: { id: string; code: string } | null = null;
+
+  if (sourcePeriodId != null) {
+    const res = await apiFetch<PeriodsResponse>(
+      `/api/catalog/periods?company_id=${encodeURIComponent(companyId)}`,
+      { method: "GET", token: token() }
+    );
+    const found = (res.data?.periods ?? []).find((p) => p.id === sourcePeriodId);
+    source = found ? { id: found.id, code: found.code } : null;
+  } else {
+    source = await findCarrySourcePeriod(companyId);
   }
-): Promise<CarryUnbidResult | null> {
-  const source =
-    sourcePeriodId != null
-      ? await supabase
-          .from("auction_periods")
-          .select("id, code")
-          .eq("id", sourcePeriodId)
-          .eq("company_id", companyId)
-          .maybeSingle()
-          .then((res) => res.data)
-      : await findCarrySourcePeriod(supabase, companyId);
 
   if (!source) return null;
 
-  const unbidItems = await fetchUnbidItemsForPeriod(supabase, source.id);
+  const unbidItems = await fetchUnbidItemsForPeriod(source.id);
   if (unbidItems.length === 0) {
     return {
       sourcePeriodId: source.id,
@@ -125,28 +119,30 @@ export async function carryUnbidItemsToPeriod(
 
   let carried = 0;
   let failed = 0;
+  const t = token();
 
   for (const item of unbidItems) {
-    const { data: created, error } = await supabase.rpc(
-      "admin_create_auction_item",
-      {
-        p_period_id: targetPeriodId,
-        p_item_name: item.item_name,
-        p_category: item.category,
-        p_description: item.description,
-        p_item_condition: item.item_condition,
-        p_status: "draft",
-        p_starting_price: item.starting_price,
-        p_bid_increment: item.bid_increment,
-      }
-    );
+    const res = await apiFetch<{ item: AuctionItem }>("/api/items", {
+      method: "POST",
+      token: t,
+      body: {
+        period_id: targetPeriodId,
+        item_name: item.item_name,
+        category: item.category,
+        description: item.description,
+        item_condition: item.item_condition,
+        status: "draft",
+        starting_price: item.starting_price,
+        bid_increment: item.bid_increment,
+      },
+    });
 
-    if (error || !created) {
+    if (!res.ok || !res.data?.item) {
       failed += 1;
       continue;
     }
 
-    await copyItemPhotos(supabase, item.id, created.id);
+    await copyItemPhotos(item.id, res.data.item.id);
     carried += 1;
   }
 

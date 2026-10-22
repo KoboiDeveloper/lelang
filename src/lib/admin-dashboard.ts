@@ -1,7 +1,5 @@
-import type { SupabaseClient } from "@supabase/supabase-js";
-import type { AuctionPeriod, Database } from "@/lib/database.types";
-
-type AppSupabase = SupabaseClient<Database>;
+import { apiFetch, getClientToken } from "@/lib/api-client";
+import type { AuctionItem, AuctionPeriod, ItemPhoto } from "@/lib/database.types";
 
 export type CompanyAssetTotals = {
   itemCount: number;
@@ -22,91 +20,94 @@ export type DashboardPeriodSummary = AuctionPeriod & {
   unbidCount: number;
 };
 
-const emptyTotals = (): CompanyAssetTotals => ({
-  itemCount: 0,
-  startingTotal: 0,
-  biddingTotal: 0,
-  biddingBaseTotal: 0,
-  itemsWithBids: 0,
-  paidTotal: 0,
-  unpaidBiddingTotal: 0,
-  paidItemCount: 0,
-  unpaidItemCount: 0,
-});
+export function emptyCompanyAssetTotals(): CompanyAssetTotals {
+  return {
+    itemCount: 0,
+    startingTotal: 0,
+    biddingTotal: 0,
+    biddingBaseTotal: 0,
+    itemsWithBids: 0,
+    paidTotal: 0,
+    unpaidBiddingTotal: 0,
+    paidItemCount: 0,
+    unpaidItemCount: 0,
+  };
+}
+
+type PeriodsResponse = { periods: AuctionPeriod[] };
+type ItemsPageResponse = {
+  items: {
+    item: AuctionItem;
+    photos: ItemPhoto[];
+    bidCount: number;
+  }[];
+  total: number;
+};
+
+async function fetchCompanyPeriods(companyId: string): Promise<AuctionPeriod[]> {
+  const res = await apiFetch<PeriodsResponse>(
+    `/api/catalog/periods?company_id=${encodeURIComponent(companyId)}`,
+    { method: "GET", token: getClientToken() }
+  );
+  return res.data?.periods ?? [];
+}
+
+async function fetchPeriodItems(periodId: string) {
+  const res = await apiFetch<ItemsPageResponse>(
+    `/api/items?period_id=${encodeURIComponent(periodId)}&offset=0&limit=1000`,
+    { method: "GET", token: getClientToken() }
+  );
+  return res.data?.items ?? [];
+}
 
 export async function fetchCompanyAssetTotals(
-  supabase: AppSupabase,
   companyId: string,
   periodId?: string | null
 ): Promise<CompanyAssetTotals> {
-  let periodIds: string[] = [];
+  const periods = await fetchCompanyPeriods(companyId);
+  const targetPeriods = periodId
+    ? periods.filter((p) => p.id === periodId)
+    : periods;
 
-  if (periodId) {
-    periodIds = [periodId];
-  } else {
-    const { data: periods } = await supabase
-      .from("auction_periods")
-      .select("id")
-      .eq("company_id", companyId);
-    periodIds = (periods ?? []).map((period) => period.id);
-  }
+  if (targetPeriods.length === 0) return emptyCompanyAssetTotals();
 
-  if (periodIds.length === 0) return emptyTotals();
+  const pages = await Promise.all(
+    targetPeriods.map((p) => fetchPeriodItems(p.id))
+  );
+  const itemList = pages.flat();
 
-  const { data: items } = await supabase
-    .from("auction_items")
-    .select("id, starting_price, payment_confirmed, current_price")
-    .in("period_id", periodIds);
-
-  const itemList = items ?? [];
-  const itemIds = itemList.map((item) => item.id);
+  if (itemList.length === 0) return emptyCompanyAssetTotals();
 
   let startingTotal = 0;
-  for (const item of itemList) {
-    startingTotal += Number(item.starting_price) || 0;
-  }
-
-  if (itemIds.length === 0) return emptyTotals();
-
-  const { data: bids } = await supabase
-    .from("bids")
-    .select("item_id, amount")
-    .in("item_id", itemIds)
-    .neq("status", "cancelled");
-
-  const maxBidByItem = new Map<string, number>();
-  for (const bid of bids ?? []) {
-    const amount = Number(bid.amount) || 0;
-    const prev = maxBidByItem.get(bid.item_id) ?? 0;
-    if (amount > prev) {
-      maxBidByItem.set(bid.item_id, amount);
-    }
-  }
-
   let biddingTotal = 0;
   let biddingBaseTotal = 0;
   let paidTotal = 0;
   let unpaidBiddingTotal = 0;
   let paidItemCount = 0;
   let unpaidItemCount = 0;
+  let itemsWithBids = 0;
 
-  for (const item of itemList) {
-    const maxBid = maxBidByItem.get(item.id);
-    const winValue =
-      maxBid != null
-        ? maxBid
-        : Number(item.current_price) || Number(item.starting_price) || 0;
+  for (const row of itemList) {
+    const item = row.item;
+    const starting = Number(item.starting_price) || 0;
+    const current = Number(item.current_price) || starting;
+    const hasBids = (row.bidCount ?? 0) > 0;
 
-    if (maxBid != null) {
-      biddingTotal += maxBid;
-      biddingBaseTotal += Number(item.starting_price) || 0;
+    startingTotal += starting;
+
+    if (hasBids) {
+      itemsWithBids += 1;
+      biddingTotal += current;
+      biddingBaseTotal += starting;
     }
+
+    const winValue = hasBids ? current : starting;
 
     if (item.payment_confirmed) {
       paidTotal += winValue;
       paidItemCount += 1;
-    } else if (maxBid != null) {
-      unpaidBiddingTotal += maxBid;
+    } else if (hasBids) {
+      unpaidBiddingTotal += current;
       unpaidItemCount += 1;
     }
   }
@@ -116,7 +117,7 @@ export async function fetchCompanyAssetTotals(
     startingTotal,
     biddingTotal,
     biddingBaseTotal,
-    itemsWithBids: maxBidByItem.size,
+    itemsWithBids,
     paidTotal,
     unpaidBiddingTotal,
     paidItemCount,
@@ -125,49 +126,15 @@ export async function fetchCompanyAssetTotals(
 }
 
 export async function fetchDashboardPeriods(
-  supabase: AppSupabase,
   companyId: string
 ): Promise<DashboardPeriodSummary[]> {
-  const { data: periods } = await supabase
-    .from("auction_periods")
-    .select("*")
-    .eq("company_id", companyId)
-    .order("start_at", { ascending: false });
-
-  const list = periods ?? [];
+  const list = await fetchCompanyPeriods(companyId);
   if (list.length === 0) return [];
 
-  const periodIds = list.map((period) => period.id);
-  const { data: items } = await supabase
-    .from("auction_items")
-    .select("id, period_id")
-    .in("period_id", periodIds);
-
-  const itemList = items ?? [];
-  const itemIds = itemList.map((item) => item.id);
-  const counts = new Map<string, number>();
-  for (const item of itemList) {
-    counts.set(item.period_id, (counts.get(item.period_id) ?? 0) + 1);
-  }
-
-  const bidCountByItem = new Map<string, number>();
-  if (itemIds.length > 0) {
-    const { data: bidCounts } = await supabase.rpc("get_item_bid_counts", {
-      p_item_ids: itemIds,
-    });
-    for (const row of bidCounts ?? []) {
-      bidCountByItem.set(row.item_id, Number(row.bid_count ?? 0));
-    }
-  }
-
-  const unbidByPeriod = new Map<string, number>();
-  for (const item of itemList) {
-    if ((bidCountByItem.get(item.id) ?? 0) > 0) continue;
-    unbidByPeriod.set(
-      item.period_id,
-      (unbidByPeriod.get(item.period_id) ?? 0) + 1
-    );
-  }
+  const pages = await Promise.all(list.map((p) => fetchPeriodItems(p.id)));
+  const itemsByPeriod = new Map(
+    list.map((period, idx) => [period.id, pages[idx] ?? []])
+  );
 
   const ranked = [...list].sort((a, b) => {
     const rank = (status: string) => {
@@ -181,9 +148,40 @@ export async function fetchDashboardPeriods(
     return new Date(b.start_at).getTime() - new Date(a.start_at).getTime();
   });
 
-  return ranked.map((period) => ({
-    ...period,
-    itemCount: counts.get(period.id) ?? 0,
-    unbidCount: unbidByPeriod.get(period.id) ?? 0,
-  }));
+  return ranked.map((period) => {
+    const items = itemsByPeriod.get(period.id) ?? [];
+    const itemCount = items.length;
+    const unbidCount = items.filter((row) => (row.bidCount ?? 0) === 0).length;
+    return { ...period, itemCount, unbidCount };
+  });
+}
+
+export async function fetchDashboardStats(companyId: string): Promise<{
+  itemCount: number;
+  bidCount: number;
+  periodCount: number;
+  bidderCount: number;
+}> {
+  const [periods, biddersRes] = await Promise.all([
+    fetchCompanyPeriods(companyId),
+    apiFetch<{ bidders: { companyId?: string; company_id?: string }[] }>(
+      "/api/admin/bidders",
+      { method: "GET", token: getClientToken() }
+    ),
+  ]);
+
+  const pages = await Promise.all(periods.map((p) => fetchPeriodItems(p.id)));
+  const allItems = pages.flat();
+  const itemCount = allItems.length;
+  const bidCount = allItems.reduce((sum, row) => sum + (row.bidCount ?? 0), 0);
+  const bidderCount = (biddersRes.data?.bidders ?? []).filter(
+    (b) => (b.company_id ?? b.companyId) === companyId
+  ).length;
+
+  return {
+    itemCount,
+    bidCount,
+    periodCount: periods.length,
+    bidderCount,
+  };
 }

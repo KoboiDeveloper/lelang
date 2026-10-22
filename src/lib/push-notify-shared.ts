@@ -1,3 +1,4 @@
+import { apiFetchServer } from "@/lib/api-client";
 import { withCompanyQuery } from "@/lib/company-utils";
 import {
   deletePushSubscriptionByEndpoint,
@@ -71,18 +72,17 @@ export async function sendPushToCompany(
   return { sent, skipped: false as const };
 }
 
+type CompaniesResponse = {
+  companies: Array<{ id: string; code: string }>;
+};
+
 export async function getCompanyCodeById(companyId: string) {
-  const { createAdminClient } = await import("@/lib/supabase/admin");
-  const admin = createAdminClient();
-  const { data, error } = await admin
-    .from("companies")
-    .select("code")
-    .eq("id", companyId)
-    .maybeSingle();
-
-  if (error) {
-    throw new Error(error.message);
+  const res = await apiFetchServer<CompaniesResponse>("/api/catalog/companies", {
+    method: "GET",
+  });
+  if (!res.ok) {
+    throw new Error(res.error ?? "Gagal memuat perusahaan");
   }
-
-  return data?.code ?? "ams";
+  const company = (res.data?.companies ?? []).find((c) => c.id === companyId);
+  return company?.code ?? "ams";
 }

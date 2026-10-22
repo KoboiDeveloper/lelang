@@ -1,9 +1,14 @@
 import "server-only";
 
-import { createClient } from "@/lib/supabase/server";
+import { apiFetchServer } from "@/lib/api-client";
 import type { NextLotItem } from "@/lib/lot-href";
+import type { AuctionItem } from "@/lib/database.types";
 
 export type { NextLotItem };
+
+type ItemsPageResponse = {
+  items: { item: AuctionItem }[];
+};
 
 export async function fetchNextLotItem({
   periodId,
@@ -14,25 +19,35 @@ export async function fetchNextLotItem({
   currentLotNumber: string;
   category?: string | null;
 }): Promise<NextLotItem | null> {
-  const supabase = await createClient();
-
-  let query = supabase
-    .from("auction_items")
-    .select("id, lot_number, item_name")
-    .eq("period_id", periodId)
-    .in("status", ["active", "ready", "sold"])
-    .gt("lot_number", currentLotNumber)
-    .order("lot_number")
-    .limit(1);
-
-  if (category && category !== "all") {
-    if (category === "Lainnya") {
-      query = query.or("category.eq.Lainnya,category.is.null");
-    } else {
-      query = query.eq("category", category);
-    }
+  const params = new URLSearchParams({
+    period_id: periodId,
+    offset: "0",
+    limit: "500",
+  });
+  if (category && category !== "all" && category !== "Lainnya") {
+    params.set("category", category);
   }
 
-  const { data } = await query;
-  return data?.[0] ?? null;
+  const res = await apiFetchServer<ItemsPageResponse>(
+    `/api/items?${params.toString()}`,
+    { method: "GET", next: { revalidate: 30 } }
+  );
+
+  let items = (res.data?.items ?? []).map((row) => row.item);
+
+  if (category === "Lainnya") {
+    items = items.filter((i) => !i.category || i.category === "Lainnya");
+  }
+
+  const next = items
+    .filter((i) => ["active", "ready", "sold"].includes(i.status))
+    .filter((i) => i.lot_number > currentLotNumber)
+    .sort((a, b) => a.lot_number.localeCompare(b.lot_number))[0];
+
+  if (!next) return null;
+  return {
+    id: next.id,
+    lot_number: next.lot_number,
+    item_name: next.item_name,
+  };
 }

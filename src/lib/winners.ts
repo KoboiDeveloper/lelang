@@ -1,6 +1,5 @@
-import { createClient } from "@/lib/supabase/server";
+import { apiFetchServer } from "@/lib/api-client";
 import {
-  AuctionBankAccount,
   AuctionPeriod,
   BankAccountWithBank,
   Company,
@@ -29,17 +28,32 @@ export type CompanyWinnerGroup = {
   bankAccounts: BankAccountWithBank[];
 };
 
+type PeriodsResponse = { periods: AuctionPeriod[] };
+type WinnersResponse = {
+  winners: Array<{
+    item_id: string;
+    lot_number: string;
+    item_name: string;
+    starting_price: number;
+    last_price: number;
+    winner_name: string | null;
+    winner_alias: string | null;
+    photo_path: string | null;
+  }>;
+};
+
 export async function fetchFinishedPeriods(
   companyId: string
 ): Promise<AuctionPeriod[]> {
-  const supabase = await createClient();
-  const { data } = await supabase
-    .from("auction_periods")
-    .select("*")
-    .eq("company_id", companyId)
-    .in("status", ["finished", "cancelled"])
-    .order("end_at", { ascending: false });
-  return data ?? [];
+  const res = await apiFetchServer<PeriodsResponse>(
+    `/api/catalog/periods?company_id=${encodeURIComponent(companyId)}`,
+    { method: "GET", next: { revalidate: 60 } }
+  );
+  return (res.data?.periods ?? [])
+    .filter((p) => p.status === "finished" || p.status === "cancelled")
+    .sort(
+      (a, b) => new Date(b.end_at).getTime() - new Date(a.end_at).getTime()
+    );
 }
 
 export async function fetchWinners(
@@ -49,39 +63,35 @@ export async function fetchWinners(
   period: AuctionPeriod | null;
   rows: WinnerRow[];
 }> {
-  const supabase = await createClient();
+  const periodsRes = await apiFetchServer<PeriodsResponse>(
+    `/api/catalog/periods?company_id=${encodeURIComponent(companyId)}`,
+    { method: "GET", next: { revalidate: 60 } }
+  );
+  const periods = periodsRes.data?.periods ?? [];
 
   let period: AuctionPeriod | null = null;
-
   if (periodId) {
-    const { data } = await supabase
-      .from("auction_periods")
-      .select("*")
-      .eq("id", periodId)
-      .eq("company_id", companyId)
-      .maybeSingle();
-    period = data;
+    period = periods.find((p) => p.id === periodId) ?? null;
   } else {
-    const { data } = await supabase
-      .from("auction_periods")
-      .select("*")
-      .eq("company_id", companyId)
-      .eq("status", "finished")
-      .order("end_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    period = data;
+    period =
+      periods
+        .filter((p) => p.status === "finished")
+        .sort(
+          (a, b) => new Date(b.end_at).getTime() - new Date(a.end_at).getTime()
+        )[0] ?? null;
   }
 
   if (!period) {
     return { period: null, rows: [] };
   }
 
-  const { data: winnerRows, error } = await supabase.rpc("get_period_winners", {
-    p_period_id: period.id,
-  });
+  const winnersRes = await apiFetchServer<WinnersResponse>(
+    `/api/items/meta/period-winners/${period.id}`,
+    { method: "GET", next: { revalidate: 60 } }
+  );
 
-  if (error || !winnerRows?.length) {
+  const winnerRows = winnersRes.data?.winners ?? [];
+  if (!winnerRows.length) {
     return { period, rows: [] };
   }
 

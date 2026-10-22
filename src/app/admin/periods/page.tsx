@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { createClient } from "@/lib/supabase/client";
+import { apiFetch, getClientToken } from "@/lib/api-client";
 import { AuctionPeriod } from "@/lib/database.types";
 import { formatDateTime } from "@/lib/format";
 import { Button } from "@/components/ui/button";
@@ -159,41 +159,41 @@ export default function PeriodsMasterDetailPage() {
   const [carryUnbid, setCarryUnbid] = useState(false);
   const [carrySource, setCarrySource] = useState<{ id: string; code: string } | null>(null);
   const [carryUnbidCount, setCarryUnbidCount] = useState(0);
-  const supabase = createClient();
   const companyId = useAdminCompanyId();
 
   const selectedPeriod = periods.find((p) => p.id === selectedId) ?? null;
 
-  async function loadItemCounts() {
-    const { data: periods } = await supabase
-      .from("auction_periods")
-      .select("id")
-      .eq("company_id", companyId);
-    const periodIds = (periods ?? []).map((period) => period.id);
-    if (periodIds.length === 0) {
+  async function loadItemCounts(periodList: AuctionPeriod[]) {
+    if (periodList.length === 0) {
       setItemCountByPeriod({});
       return;
     }
-    const { data } = await supabase
-      .from("auction_items")
-      .select("period_id")
-      .in("period_id", periodIds);
+    const pages = await Promise.all(
+      periodList.map((period) =>
+        apiFetch<{ total: number }>(
+          `/api/items?period_id=${encodeURIComponent(period.id)}&offset=0&limit=1`,
+          { method: "GET", token: getClientToken() }
+        )
+      )
+    );
     const counts: Record<string, number> = {};
-    for (const row of data ?? []) {
-      counts[row.period_id] = (counts[row.period_id] ?? 0) + 1;
-    }
+    periodList.forEach((period, idx) => {
+      counts[period.id] = pages[idx]?.data?.total ?? 0;
+    });
     setItemCountByPeriod(counts);
   }
 
   async function loadPeriods() {
-    const { data } = await supabase
-      .from("auction_periods")
-      .select("*")
-      .eq("company_id", companyId)
-      .order("created_at", { ascending: false });
-    const list = data ?? [];
+    const res = await apiFetch<{ periods: AuctionPeriod[] }>(
+      `/api/catalog/periods?company_id=${encodeURIComponent(companyId)}`,
+      { method: "GET", token: getClientToken() }
+    );
+    const list = [...(res.data?.periods ?? [])].sort(
+      (a, b) =>
+        new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+    );
     setPeriods(list);
-    await loadItemCounts();
+    await loadItemCounts(list);
     if (list.length > 0 && !selectedId) {
       setSelectedId(list[0].id);
     }
@@ -227,14 +227,14 @@ export default function PeriodsMasterDetailPage() {
   }
 
   async function loadCarryOptions() {
-    const source = await findCarrySourcePeriod(supabase, companyId);
+    const source = await findCarrySourcePeriod(companyId);
     if (!source) {
       setCarrySource(null);
       setCarryUnbidCount(0);
       setCarryUnbid(false);
       return;
     }
-    const unbidItems = await fetchUnbidItemsForPeriod(supabase, source.id);
+    const unbidItems = await fetchUnbidItemsForPeriod(source.id);
     setCarrySource(source);
     setCarryUnbidCount(unbidItems.length);
     setCarryUnbid(unbidItems.length > 0);
@@ -293,22 +293,25 @@ export default function PeriodsMasterDetailPage() {
       company_id: companyId,
     };
 
-    const { data, error } = editingId
-      ? await supabase
-          .from("auction_periods")
-          .update(payload)
-          .eq("id", editingId)
-          .select()
-          .single()
-      : await supabase.from("auction_periods").insert(payload).select().single();
+    const res = editingId
+      ? await apiFetch<{ period: AuctionPeriod }>(
+          `/api/catalog/periods/${editingId}`,
+          { method: "PATCH", token: getClientToken(), body: payload }
+        )
+      : await apiFetch<{ period: AuctionPeriod }>("/api/catalog/periods", {
+          method: "POST",
+          token: getClientToken(),
+          body: payload,
+        });
 
     setLoading(false);
 
-    if (error) {
-      toast.error(error.message);
+    if (!res.ok || !res.data?.period) {
+      toast.error(res.error ?? "Gagal menyimpan periode");
       return;
     }
 
+    const data = res.data.period;
     toast.success(editingId ? "Periode diperbarui" : "Periode dibuat");
 
     const isCreate = !editingId;
@@ -327,7 +330,7 @@ export default function PeriodsMasterDetailPage() {
 
     if (shouldCarry && data && carrySourceId) {
       try {
-        const result = await carryUnbidItemsToPeriod(supabase, {
+        const result = await carryUnbidItemsToPeriod({
           companyId,
           targetPeriodId: data.id,
           sourcePeriodId: carrySourceId,
@@ -380,16 +383,16 @@ export default function PeriodsMasterDetailPage() {
     const deletedId = deletePeriodTarget.id;
     setDeletingPeriod(true);
 
-    const { error } = await supabase
-      .from("auction_periods")
-      .delete()
-      .eq("id", deletedId);
+    const res = await apiFetch(`/api/catalog/periods/${deletedId}`, {
+      method: "DELETE",
+      token: getClientToken(),
+    });
 
     setDeletingPeriod(false);
     setDeletePeriodTarget(null);
 
-    if (error) {
-      toast.error(error.message);
+    if (!res.ok) {
+      toast.error(res.error ?? "Gagal menghapus periode");
       return;
     }
 
@@ -579,7 +582,7 @@ export default function PeriodsMasterDetailPage() {
                 key={selectedPeriod.id}
                 period={selectedPeriod}
                 periodId={selectedPeriod.id}
-                onItemsChange={loadItemCounts}
+                onItemsChange={() => loadItemCounts(periods)}
               />
             </div>
           ) : (
@@ -625,7 +628,7 @@ export default function PeriodsMasterDetailPage() {
                 key={selectedPeriod.id}
                 period={selectedPeriod}
                 periodId={selectedPeriod.id}
-                onItemsChange={loadItemCounts}
+                onItemsChange={() => loadItemCounts(periods)}
               />
             </div>
           ) : null}

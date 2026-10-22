@@ -1,30 +1,30 @@
-import { createClient } from "@/lib/supabase/server";
+import { apiFetchServer } from "@/lib/api-client";
 import { AuctionPeriod } from "@/lib/database.types";
+
+type PeriodsResponse = { periods: AuctionPeriod[] };
 
 export async function fetchDisplayPeriod(
   companyId: string
 ): Promise<AuctionPeriod | null> {
-  const supabase = await createClient();
+  const res = await apiFetchServer<PeriodsResponse>(
+    `/api/catalog/periods?company_id=${encodeURIComponent(companyId)}`,
+    { method: "GET", next: { revalidate: 30 } }
+  );
 
-  const { data: active } = await supabase
-    .from("auction_periods")
-    .select("*")
-    .eq("company_id", companyId)
-    .eq("status", "active")
-    .order("start_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
+  const periods = res.data?.periods ?? [];
+  const active = periods
+    .filter((p) => p.status === "active")
+    .sort(
+      (a, b) =>
+        new Date(b.start_at).getTime() - new Date(a.start_at).getTime()
+    )[0];
   if (active) return active;
 
-  const { data: finished } = await supabase
-    .from("auction_periods")
-    .select("*")
-    .eq("company_id", companyId)
-    .eq("status", "finished")
-    .order("end_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  const finished = periods
+    .filter((p) => p.status === "finished")
+    .sort(
+      (a, b) => new Date(b.end_at).getTime() - new Date(a.end_at).getTime()
+    )[0];
 
-  return finished;
+  return finished ?? null;
 }

@@ -1,47 +1,40 @@
-import type { SupabaseClient } from "@supabase/supabase-js";
-import type { Database } from "@/lib/database.types";
+import { apiFetch, getClientToken } from "@/lib/api-client";
+import type { BidderProfile } from "@/lib/database.types";
 
-type AppSupabase = SupabaseClient<Database>;
+type BiddersWithBidsResponse = {
+  bidders: BidderProfile[];
+  bid_counts?: Record<string, number>;
+};
 
-export async function fetchBidderIdsWithCompanyBids(
-  supabase: AppSupabase,
+export async function fetchCompanyBiddersWithBids(
   companyId: string
-): Promise<string[]> {
-  const { data, error } = await supabase
-    .from("bids")
-    .select("bidder_id, auction_items!inner(auction_periods!inner(company_id))")
-    .eq("auction_items.auction_periods.company_id", companyId);
-
-  if (error) {
-    throw error;
+): Promise<{ bidders: BidderProfile[]; bidCounts: Record<string, number> }> {
+  const res = await apiFetch<BiddersWithBidsResponse>(
+    `/api/admin/bidders?company_id=${encodeURIComponent(companyId)}&with_bids=1`,
+    { method: "GET", token: getClientToken() }
+  );
+  if (!res.ok) {
+    throw new Error(res.error ?? "Gagal memuat daftar bidder");
   }
-
-  return [...new Set((data ?? []).map((row) => row.bidder_id))];
+  return {
+    bidders: res.data?.bidders ?? [],
+    bidCounts: res.data?.bid_counts ?? {},
+  };
 }
 
+/** @deprecated use fetchCompanyBiddersWithBids */
+export async function fetchBidderIdsWithCompanyBids(
+  companyId: string
+): Promise<string[]> {
+  const { bidders } = await fetchCompanyBiddersWithBids(companyId);
+  return bidders.map((b) => b.id);
+}
+
+/** @deprecated use fetchCompanyBiddersWithBids */
 export async function countCompanyBidsByBidder(
-  supabase: AppSupabase,
   companyId: string,
-  bidderIds: string[]
+  _bidderIds: string[]
 ): Promise<Record<string, number>> {
-  if (bidderIds.length === 0) {
-    return {};
-  }
-
-  const { data, error } = await supabase
-    .from("bids")
-    .select("bidder_id, auction_items!inner(auction_periods!inner(company_id))")
-    .eq("auction_items.auction_periods.company_id", companyId)
-    .in("bidder_id", bidderIds);
-
-  if (error) {
-    throw error;
-  }
-
-  const counts: Record<string, number> = {};
-  for (const row of data ?? []) {
-    counts[row.bidder_id] = (counts[row.bidder_id] ?? 0) + 1;
-  }
-
-  return counts;
+  const { bidCounts } = await fetchCompanyBiddersWithBids(companyId);
+  return bidCounts;
 }

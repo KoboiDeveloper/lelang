@@ -12,10 +12,17 @@ import { ArrowLeft, Mail, ShieldCheck } from "lucide-react";
 
 type Step = "nik" | "reset";
 
+function maskEmail(email: string): string {
+  const [local, domain] = email.split("@");
+  if (!domain) return email;
+  if (local.length <= 2) return `*@${domain}`;
+  return `${local.slice(0, 2)}${"*".repeat(Math.min(local.length - 2, 6))}@${domain}`;
+}
+
 export default function LupaPasswordForm() {
   const [step, setStep] = useState<Step>("nik");
   const [employeeNik, setEmployeeNik] = useState("");
-  const [fullName, setFullName] = useState("");
+  const [email, setEmail] = useState("");
   const [maskedEmail, setMaskedEmail] = useState("");
   const [otp, setOtp] = useState("");
   const [password, setPassword] = useState("");
@@ -28,8 +35,13 @@ export default function LupaPasswordForm() {
   async function handleSendOtp(e: React.FormEvent) {
     e.preventDefault();
     const nik = employeeNik.trim();
+    const mail = email.trim().toLowerCase();
     if (!nik) {
       toast.error("NIK wajib diisi");
+      return;
+    }
+    if (!mail) {
+      toast.error("Email wajib diisi");
       return;
     }
 
@@ -37,7 +49,7 @@ export default function LupaPasswordForm() {
     const res = await fetch("/api/auth/forgot-password/send-otp", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ employeeNik: nik }),
+      body: JSON.stringify({ employeeNik: nik, email: mail }),
     });
     const data = await res.json();
     setLoading(false);
@@ -47,11 +59,11 @@ export default function LupaPasswordForm() {
       return;
     }
 
-    setFullName(data.fullName ?? "");
-    setMaskedEmail(data.maskedEmail ?? "");
-    setEmployeeNik(data.employeeNik ?? nik);
+    setMaskedEmail(maskEmail(mail));
+    setEmployeeNik(nik);
+    setEmail(mail);
     setStep("reset");
-    toast.success(`OTP dikirim ke ${data.maskedEmail ?? "email terdaftar"}`);
+    toast.success(`OTP dikirim ke ${maskEmail(mail)}`);
   }
 
   async function handleResendOtp() {
@@ -59,7 +71,7 @@ export default function LupaPasswordForm() {
     const res = await fetch("/api/auth/forgot-password/send-otp", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ employeeNik }),
+      body: JSON.stringify({ employeeNik, email }),
     });
     const data = await res.json();
     setLoading(false);
@@ -96,6 +108,7 @@ export default function LupaPasswordForm() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         employeeNik,
+        email,
         otp: otp.trim(),
         password,
       }),
@@ -117,7 +130,7 @@ export default function LupaPasswordForm() {
       title="Lupa Password"
       subtitle={
         step === "nik"
-          ? "Masukkan NIK karyawan untuk menerima OTP di email terdaftar"
+          ? "Masukkan NIK dan email terdaftar untuk menerima OTP"
           : `Verifikasi OTP yang dikirim ke ${maskedEmail}`
       }
       showBidderBranding={false}
@@ -138,6 +151,18 @@ export default function LupaPasswordForm() {
                   required
                 />
               </div>
+              <div className="space-y-2">
+                <Label htmlFor="email">Email Terdaftar</Label>
+                <Input
+                  id="email"
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="nama@perusahaan.com"
+                  autoComplete="email"
+                  required
+                />
+              </div>
               <Button type="submit" className="w-full" size="lg" disabled={loading}>
                 <Mail className="mr-2 h-4 w-4" />
                 {loading ? "Mengirim OTP..." : "Kirim OTP ke Email"}
@@ -146,7 +171,6 @@ export default function LupaPasswordForm() {
           ) : (
             <form onSubmit={handleResetPassword} className="space-y-4">
               <div className="rounded-xl border border-indigo-100 bg-indigo-50/60 px-4 py-3 text-sm text-slate-700">
-                <p className="font-medium text-slate-900">{fullName || "Pengguna terdaftar"}</p>
                 <p className="mt-1 text-slate-600">NIK: {employeeNik}</p>
                 <p className="mt-1 text-slate-500">OTP dikirim ke {maskedEmail}</p>
               </div>
@@ -215,7 +239,7 @@ export default function LupaPasswordForm() {
                 }}
               >
                 <ArrowLeft className="mr-2 h-4 w-4" />
-                Ganti NIK
+                Ganti NIK / Email
               </Button>
             </form>
           )}

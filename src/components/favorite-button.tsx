@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Heart, Loader2 } from "lucide-react";
-import { createClient } from "@/lib/supabase/client";
+import { apiFetch, getClientToken } from "@/lib/api-client";
+import { getStoredUser, onAuthChange } from "@/lib/session";
 import { notifyFavoritesChanged, onFavoritesChanged } from "@/lib/favorite-events";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
@@ -18,7 +19,6 @@ export function FavoriteButton({
   className?: string;
 }) {
   const pathname = usePathname();
-  const supabase = useMemo(() => createClient(), []);
   const [userId, setUserId] = useState<string | null>(null);
   const [favorited, setFavorited] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -31,39 +31,37 @@ export function FavoriteButton({
 
     async function load() {
       setLoading(true);
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      if (cancelled) return;
-
-      if (!user) {
-        setUserId(null);
-        setFavorited(false);
-        setLoading(false);
+      const token = getClientToken();
+      const stored = getStoredUser();
+      if (!token || !stored) {
+        if (!cancelled) {
+          setUserId(null);
+          setFavorited(false);
+          setLoading(false);
+        }
         return;
       }
 
-      setUserId(user.id);
-      const { data, error } = await supabase
-        .from("favorites")
-        .select("id")
-        .eq("user_id", user.id)
-        .eq("item_id", itemId)
-        .maybeSingle();
+      setUserId(stored.id);
+      const res = await apiFetch<{
+        favorites: { itemId?: string; item_id?: string }[];
+      }>("/api/catalog/favorites", { method: "GET", token });
 
       if (cancelled) return;
-      if (error) {
+      if (!res.ok) {
         setFavorited(false);
       } else {
-        setFavorited(Boolean(data));
+        setFavorited(
+          (res.data?.favorites ?? []).some(
+            (f) => (f.item_id ?? f.itemId) === itemId
+          )
+        );
       }
       setLoading(false);
     }
 
     void load();
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange(() => {
+    const unsubAuth = onAuthChange(() => {
       void load();
     });
     const unsubscribeFavorites = onFavoritesChanged(() => {
@@ -71,38 +69,39 @@ export function FavoriteButton({
     });
     return () => {
       cancelled = true;
-      subscription.unsubscribe();
+      unsubAuth();
       unsubscribeFavorites();
     };
-  }, [itemId, supabase]);
+  }, [itemId]);
 
   async function toggleFavorite() {
-    if (!userId || toggling) return;
+    const token = getClientToken();
+    if (!userId || !token || toggling) return;
     setToggling(true);
     const next = !favorited;
     setFavorited(next);
 
     if (next) {
-      const { error } = await supabase.from("favorites").insert({
-        user_id: userId,
-        item_id: itemId,
+      const res = await apiFetch("/api/catalog/favorites", {
+        method: "POST",
+        token,
+        body: { item_id: itemId },
       });
-      if (error) {
+      if (!res.ok) {
         setFavorited(false);
-        toast.error(error.message || "Gagal menambah favorit");
+        toast.error(res.error || "Gagal menambah favorit");
         setToggling(false);
         return;
       }
       toast.success("Ditambahkan ke favorit");
     } else {
-      const { error } = await supabase
-        .from("favorites")
-        .delete()
-        .eq("user_id", userId)
-        .eq("item_id", itemId);
-      if (error) {
+      const res = await apiFetch(`/api/catalog/favorites/${itemId}`, {
+        method: "DELETE",
+        token,
+      });
+      if (!res.ok) {
         setFavorited(true);
-        toast.error(error.message || "Gagal menghapus favorit");
+        toast.error(res.error || "Gagal menghapus favorit");
         setToggling(false);
         return;
       }

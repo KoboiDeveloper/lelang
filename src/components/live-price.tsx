@@ -1,8 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { createClient } from "@/lib/supabase/client";
-import { AuctionItem } from "@/lib/database.types";
+import { useCallback, useEffect, useState } from "react";
+import { apiFetch, getClientToken } from "@/lib/api-client";
 import { formatRupiah } from "@/lib/format";
 import { subscribeItemBidUpdates } from "@/lib/bid-events";
 import { cn } from "@/lib/utils";
@@ -16,61 +15,39 @@ export function LivePrice({
 }) {
   const [price, setPrice] = useState(initialPrice);
   const [pulse, setPulse] = useState(false);
-  const supabase = useMemo(() => createClient(), []);
 
   const loadPrice = useCallback(async () => {
-    const { data } = await supabase
-      .from("auction_items")
-      .select("current_price")
-      .eq("id", itemId)
-      .maybeSingle();
-
-    if (!data) return;
+    const res = await apiFetch<{ current_price: number }>(
+      `/api/items/${itemId}/price`,
+      { method: "GET", token: getClientToken() }
+    );
+    if (!res.ok || res.data?.current_price == null) return;
 
     setPrice((prev) => {
-      if (prev !== data.current_price) {
+      if (prev !== res.data.current_price) {
         setPulse(true);
         setTimeout(() => setPulse(false), 800);
       }
-      return data.current_price;
+      return res.data.current_price;
     });
-  }, [itemId, supabase]);
+  }, [itemId]);
 
   useEffect(() => {
     setPrice(initialPrice);
   }, [initialPrice]);
 
   useEffect(() => {
+    void loadPrice();
     const unsubscribe = subscribeItemBidUpdates(itemId, loadPrice);
-
-    const channel = supabase
-      .channel(`price-${itemId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "auction_items",
-          filter: `id=eq.${itemId}`,
-        },
-        (payload) => {
-          const updated = payload.new as AuctionItem;
-          setPrice((prev) => {
-            if (prev !== updated.current_price) {
-              setPulse(true);
-              setTimeout(() => setPulse(false), 800);
-            }
-            return updated.current_price;
-          });
-        }
-      )
-      .subscribe();
+    const interval = setInterval(() => {
+      void loadPrice();
+    }, 3000);
 
     return () => {
       unsubscribe();
-      supabase.removeChannel(channel);
+      clearInterval(interval);
     };
-  }, [itemId, loadPrice, supabase]);
+  }, [itemId, loadPrice]);
 
   return (
     <p

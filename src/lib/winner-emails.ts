@@ -1,7 +1,7 @@
-import { createAdminClient } from "@/lib/supabase/admin";
+import { apiFetchServer, getServerToken } from "@/lib/api-client";
 import { sendWinnerNotificationEmail } from "@/lib/email";
 import { fetchCompanyById } from "@/lib/companies";
-import { AuctionBankAccount } from "@/lib/database.types";
+import { AuctionBankAccount, AuctionPeriod } from "@/lib/database.types";
 
 export type WinnerNotificationRow = {
   bidder_id: string;
@@ -64,19 +64,31 @@ export type SendWinnerEmailsResult = {
   alreadySent: boolean;
 };
 
+type PeriodsResponse = { periods: AuctionPeriod[] };
+type NotificationsResponse = { notifications: WinnerNotificationRow[] };
+type BankAccountsResponse = {
+  accounts: Array<
+    AuctionBankAccount & {
+      banks?: { id: string; code: string; name: string } | null;
+      bank?: { id: string; code: string; name: string } | null;
+    }
+  >;
+};
+
 export async function sendWinnerEmailsForPeriod(
   periodId: string,
   options?: { force?: boolean }
 ): Promise<SendWinnerEmailsResult> {
-  const admin = createAdminClient();
+  const token = await getServerToken();
 
-  const { data: period, error: periodError } = await admin
-    .from("auction_periods")
-    .select("id, code, title, status, winner_emails_sent_at, company_id")
-    .eq("id", periodId)
-    .maybeSingle();
+  const periodsRes = await apiFetchServer<PeriodsResponse>(
+    "/api/catalog/periods",
+    { method: "GET", token }
+  );
+  const period =
+    (periodsRes.data?.periods ?? []).find((p) => p.id === periodId) ?? null;
 
-  if (periodError || !period) {
+  if (!period) {
     throw new Error("Periode tidak ditemukan");
   }
 
@@ -93,31 +105,32 @@ export async function sendWinnerEmailsForPeriod(
     };
   }
 
-  const { data: rows, error: rowsError } = await admin.rpc(
-    "get_period_winner_notifications",
-    { p_period_id: periodId }
+  const rowsRes = await apiFetchServer<NotificationsResponse>(
+    `/api/items/meta/period-winner-notifications/${periodId}`,
+    { method: "GET", token }
   );
 
-  if (rowsError) {
-    throw new Error(rowsError.message);
+  if (!rowsRes.ok) {
+    throw new Error(rowsRes.error ?? "Gagal memuat notifikasi pemenang");
   }
 
-  const recipients = groupWinnerNotifications(rows ?? []);
+  const rows = rowsRes.data?.notifications ?? [];
+  const recipients = groupWinnerNotifications(rows);
 
   const uniqueBiddersWithoutEmail = new Set(
-    (rows ?? []).filter((row) => !row.bidder_email).map((row) => row.bidder_id)
+    rows.filter((row) => !row.bidder_email).map((row) => row.bidder_id)
   ).size;
 
-  const { data: bankAccounts } = await admin
-    .from("auction_bank_accounts")
-    .select("*, banks(id, code, name)")
-    .eq("company_id", period.company_id)
-    .eq("is_active", true)
-    .order("created_at", { ascending: true });
+  const banksRes = await apiFetchServer<BankAccountsResponse>(
+    `/api/catalog/bank-accounts?company_id=${encodeURIComponent(period.company_id)}`,
+    { method: "GET", token }
+  );
 
-  const activeAccounts = (bankAccounts ?? []) as (AuctionBankAccount & {
-    banks: { id: string; code: string; name: string } | null;
-  })[];
+  const activeAccounts = (banksRes.data?.accounts ?? []).map((account) => ({
+    ...account,
+    banks: account.banks ?? account.bank ?? null,
+  }));
+
   const company = await fetchCompanyById(period.company_id);
   const companyShortName = company?.short_name ?? "E-Lelang";
   const companyName = company?.name ?? "E-Lelang";
@@ -145,10 +158,17 @@ export async function sendWinnerEmailsForPeriod(
   }
 
   if (sent > 0 || recipients.length === 0) {
-    await admin
-      .from("auction_periods")
-      .update({ winner_emails_sent_at: new Date().toISOString() })
-      .eq("id", periodId);
+    const patchRes = await apiFetchServer(
+      `/api/catalog/periods/${periodId}`,
+      {
+        method: "PATCH",
+        token,
+        body: { winner_emails_sent_at: new Date().toISOString() },
+      }
+    );
+    if (!patchRes.ok) {
+      throw new Error(patchRes.error ?? "Gagal menandai email pemenang terkirim");
+    }
   }
 
   return {

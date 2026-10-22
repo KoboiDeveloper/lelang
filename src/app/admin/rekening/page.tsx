@@ -1,11 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { createClient } from "@/lib/supabase/client";
+import { apiFetch, getClientToken } from "@/lib/api-client";
 import { BankAccountWithBank, Bank } from "@/lib/database.types";
 import { Button } from "@/components/ui/button";
 import { Input, Label, Select, Textarea } from "@/components/ui/input";
-import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
@@ -184,22 +183,31 @@ export default function RekeningPage() {
   const [loading, setLoading] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<BankAccountWithBank | null>(null);
-  const supabase = createClient();
   const companyId = useAdminCompanyId();
 
   const isFormOpen = addingNew || editingId !== null;
 
   async function load() {
-    const [{ data: accountData }, { data: bankData }] = await Promise.all([
-      supabase
-        .from("auction_bank_accounts")
-        .select("*, banks(id, code, name)")
-        .eq("company_id", companyId)
-        .order("created_at", { ascending: true }),
-      supabase.from("banks").select("*").order("sort_order", { ascending: true }),
+    const [accountsRes, banksRes] = await Promise.all([
+      apiFetch<{ accounts: BankAccountWithBank[] }>(
+        `/api/catalog/bank-accounts?company_id=${encodeURIComponent(companyId)}&include_inactive=1`,
+        { method: "GET", token: getClientToken() }
+      ),
+      apiFetch<{ banks: Bank[] }>("/api/catalog/banks", {
+        method: "GET",
+        token: getClientToken(),
+      }),
     ]);
-    setAccounts(accountData ?? []);
-    setBanks(bankData ?? []);
+    const accountList = (accountsRes.data?.accounts ?? []).map((a) => ({
+      ...a,
+      banks: a.banks ?? null,
+    }));
+    accountList.sort(
+      (a, b) =>
+        new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+    );
+    setAccounts(accountList);
+    setBanks(banksRes.data?.banks ?? []);
   }
 
   useEffect(() => {
@@ -246,20 +254,28 @@ export default function RekeningPage() {
       company_id: companyId,
     };
 
-    const { error } = editingId
-      ? await supabase.from("auction_bank_accounts").update({
-          bank_id: payload.bank_id,
-          account_number: payload.account_number,
-          account_holder: payload.account_holder,
-          notes: payload.notes,
-          is_active: payload.is_active,
-        }).eq("id", editingId)
-      : await supabase.from("auction_bank_accounts").insert(payload);
+    const res = editingId
+      ? await apiFetch(`/api/catalog/bank-accounts/${editingId}`, {
+          method: "PATCH",
+          token: getClientToken(),
+          body: {
+            bank_id: payload.bank_id,
+            account_number: payload.account_number,
+            account_holder: payload.account_holder,
+            notes: payload.notes,
+            is_active: payload.is_active,
+          },
+        })
+      : await apiFetch("/api/catalog/bank-accounts", {
+          method: "POST",
+          token: getClientToken(),
+          body: payload,
+        });
 
     setLoading(false);
 
-    if (error) {
-      toast.error(error.message);
+    if (!res.ok) {
+      toast.error(res.error ?? "Gagal menyimpan rekening");
       return;
     }
 
@@ -272,16 +288,16 @@ export default function RekeningPage() {
     if (!deleteTarget) return;
 
     setDeleting(true);
-    const { error } = await supabase
-      .from("auction_bank_accounts")
-      .delete()
-      .eq("id", deleteTarget.id);
+    const res = await apiFetch(`/api/catalog/bank-accounts/${deleteTarget.id}`, {
+      method: "DELETE",
+      token: getClientToken(),
+    });
 
     setDeleting(false);
     setDeleteTarget(null);
 
-    if (error) {
-      toast.error(error.message);
+    if (!res.ok) {
+      toast.error(res.error ?? "Gagal menghapus rekening");
       return;
     }
 

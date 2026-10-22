@@ -1,11 +1,18 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { createClient } from "@/lib/supabase/client";
 import { Profile } from "@/lib/database.types";
 import { isStaffRole } from "@/lib/roles";
+import {
+  clearSession,
+  fetchMe,
+  getStoredUser,
+  getToken,
+  onAuthChange,
+  sessionUserToProfile,
+} from "@/lib/session";
 import { Button } from "@/components/ui/button";
 import { LogOut, User } from "lucide-react";
 
@@ -13,7 +20,6 @@ export function NavbarAuth({ profile: profileProp }: { profile?: Profile | null 
   const [profile, setProfile] = useState<Profile | null>(profileProp ?? null);
   const [loading, setLoading] = useState(!profileProp);
   const router = useRouter();
-  const supabase = useMemo(() => createClient(), []);
 
   useEffect(() => {
     setProfile(profileProp ?? null);
@@ -26,39 +32,30 @@ export function NavbarAuth({ profile: profileProp }: { profile?: Profile | null 
     if (profileProp !== undefined) return;
 
     async function loadProfile() {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-
-      if (!user) {
+      const token = getToken();
+      if (!token) {
         setProfile(null);
         setLoading(false);
         return;
       }
-
-      const { data } = await supabase
-        .from("profiles")
-        .select("*")
-        .eq("id", user.id)
-        .maybeSingle();
-
-      setProfile(data);
+      const stored = getStoredUser();
+      if (stored) {
+        setProfile(sessionUserToProfile(stored));
+        setLoading(false);
+      }
+      const user = await fetchMe(token);
+      setProfile(user ? sessionUserToProfile(user) : null);
       setLoading(false);
     }
 
-    loadProfile();
-
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange(() => {
-      loadProfile();
+    void loadProfile();
+    return onAuthChange(() => {
+      void loadProfile();
     });
-
-    return () => subscription.unsubscribe();
-  }, [supabase, profileProp]);
+  }, [profileProp]);
 
   async function handleLogout() {
-    await supabase.auth.signOut();
+    clearSession();
     setProfile(null);
     router.refresh();
   }

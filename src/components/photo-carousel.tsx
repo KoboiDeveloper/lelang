@@ -1,12 +1,12 @@
 "use client";
 
 import { useState } from "react";
-import Image from "next/image";
 import { ItemPhoto } from "@/lib/database.types";
 import { getPhotoUrl } from "@/lib/format";
 import { ChevronLeft, ChevronRight, ZoomIn } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ImagePreviewDialog } from "@/components/image-preview-dialog";
+import { PhotoImage } from "@/components/photo-image";
 
 export function PhotoCarousel({
   photos,
@@ -40,7 +40,7 @@ export function PhotoCarousel({
           className="absolute inset-0 z-0 cursor-zoom-in"
           aria-label="Perbesar foto"
         >
-          <Image
+          <PhotoImage
             src={getPhotoUrl(photos[index].storage_path)}
             alt={`${alt} - foto ${index + 1}`}
             fill
@@ -117,7 +117,7 @@ export function PhotoCarousel({
               )}
               aria-label={`Pilih foto ${i + 1}`}
             >
-              <Image
+              <PhotoImage
                 src={getPhotoUrl(photo.storage_path)}
                 alt=""
                 fill

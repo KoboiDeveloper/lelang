@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { createClient } from "@/lib/supabase/client";
+import { apiFetch, getClientToken } from "@/lib/api-client";
 import { formatDateTime, formatRupiah } from "@/lib/format";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -30,6 +30,11 @@ type BidderBidRow = {
   } | null;
 };
 
+type BidsResponse = {
+  bids: BidderBidRow[];
+  total: number;
+};
+
 export function BidderBidsPanel({
   bidderId,
   companyId,
@@ -45,7 +50,6 @@ export function BidderBidsPanel({
   const [loading, setLoading] = useState(true);
   const [deleting, setDeleting] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<BidderBidRow | null>(null);
-  const supabase = createClient();
 
   useEffect(() => {
     setPage(1);
@@ -55,36 +59,29 @@ export function BidderBidsPanel({
     setLoading(true);
 
     const from = (page - 1) * DEFAULT_PAGE_SIZE;
-    const to = from + DEFAULT_PAGE_SIZE - 1;
+    const params = new URLSearchParams({
+      bidder_id: bidderId,
+      offset: String(from),
+      limit: String(DEFAULT_PAGE_SIZE),
+    });
+    if (companyId) params.set("company_id", companyId);
 
-    const selectFields = companyId
-      ? "id, amount, status, created_at, auction_items!inner(id, lot_number, item_name, starting_price, current_price, auction_periods!inner(code, title, status, company_id))"
-      : "id, amount, status, created_at, auction_items(id, lot_number, item_name, starting_price, current_price, auction_periods(code, title, status, company_id))";
-
-    let query = supabase
-      .from("bids")
-      .select(selectFields, { count: "exact" })
-      .eq("bidder_id", bidderId)
-      .order("created_at", { ascending: false })
-      .range(from, to);
-
-    if (companyId) {
-      query = query.eq("auction_items.auction_periods.company_id", companyId);
-    }
-
-    const { data, count, error } = await query;
+    const res = await apiFetch<BidsResponse>(`/api/admin/bids?${params}`, {
+      method: "GET",
+      token: getClientToken(),
+    });
 
     setLoading(false);
 
-    if (error) {
-      toast.error(error.message);
+    if (!res.ok) {
+      toast.error(res.error ?? "Gagal memuat penawaran");
       setBids([]);
       setBidsTotal(0);
       return;
     }
 
-    setBids((data ?? []) as unknown as BidderBidRow[]);
-    setBidsTotal(count ?? 0);
+    setBids(res.data?.bids ?? []);
+    setBidsTotal(res.data?.total ?? 0);
   }
 
   useEffect(() => {
@@ -95,14 +92,15 @@ export function BidderBidsPanel({
     if (!deleteTarget) return;
 
     setDeleting(true);
-    const { error } = await supabase.rpc("admin_delete_bid", {
-      p_bid_id: deleteTarget.id,
+    const res = await apiFetch(`/api/items/bids/${deleteTarget.id}`, {
+      method: "DELETE",
+      token: getClientToken(),
     });
     setDeleting(false);
     setDeleteTarget(null);
 
-    if (error) {
-      toast.error(error.message);
+    if (!res.ok) {
+      toast.error(res.error ?? "Gagal menghapus penawaran");
       return;
     }
 

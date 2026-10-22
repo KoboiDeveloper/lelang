@@ -29,6 +29,14 @@ export function formatDateTime(date: string): string {
 }
 
 export function getPhotoUrl(storagePath: string): string {
-  const base = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  return `${base}/storage/v1/object/public/auction-photos/${storagePath}`;
+  const base = (
+    process.env.NEXT_PUBLIC_API_URL || "http://localhost:4100"
+  ).replace(/\/$/, "");
+  const path = storagePath.startsWith("/") ? storagePath : `/${storagePath}`;
+  // Dropbox paths (e.g. /uploads/lelang/...) are served via BE proxy
+  if (path.startsWith("/uploads/") || path.includes("/lelang/")) {
+    return `${base}/api/files/proxy?path=${encodeURIComponent(path)}`;
+  }
+  // Legacy relative storage keys — still proxy through BE
+  return `${base}/api/files/proxy?path=${encodeURIComponent(path)}`;
 }

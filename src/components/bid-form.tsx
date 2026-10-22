@@ -1,9 +1,16 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { createClient } from "@/lib/supabase/client";
+import { apiFetch, getClientToken } from "@/lib/api-client";
+import {
+  clearSession,
+  fetchMe,
+  getStoredUser,
+  onAuthChange,
+  type SessionUser,
+} from "@/lib/session";
 import { AuctionItem, AuctionPeriod } from "@/lib/database.types";
 import { formatRupiah, formatNumberId, parseRupiahInput } from "@/lib/format";
 import { isPeriodBiddingOpen, MAX_BIDS_PER_ITEM } from "@/lib/auction";
@@ -43,7 +50,6 @@ export function BidForm({
   const [authLoading, setAuthLoading] = useState(true);
   const [bidder, setBidder] = useState<BidderInfo | null>(null);
   const [bidCount, setBidCount] = useState<number | null>(null);
-  const supabase = useMemo(() => createClient(), []);
 
   const remainingBids =
     bidCount === null ? null : Math.max(0, MAX_BIDS_PER_ITEM - bidCount);
@@ -51,82 +57,53 @@ export function BidForm({
 
   useEffect(() => {
     async function loadBidder() {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-
-      if (!user) {
+      const token = getClientToken();
+      if (!token) {
         setBidder(null);
+        setBidCount(null);
         setAuthLoading(false);
         return;
       }
 
-      const { data: profile } = await supabase
-        .from("profiles")
-        .select("full_name, employee_nik, role")
-        .eq("id", user.id)
-        .maybeSingle();
+      const user: SessionUser | null =
+        getStoredUser() ?? (await fetchMe(token));
 
-      const { data: bidderProfile } = await supabase
-        .from("bidder_profiles")
-        .select("id, employee_nik, full_name, is_active")
-        .eq("auth_user_id", user.id)
-        .maybeSingle();
-
-      if (bidderProfile?.is_active) {
-        setBidder({
-          id: bidderProfile.id,
-          employeeNik: bidderProfile.employee_nik,
-          fullName: bidderProfile.full_name,
-        });
-        await loadBidCount(bidderProfile.id);
-      } else if (profile?.role === "bidder" && profile.employee_nik) {
-        setBidder({
-          id: "",
-          employeeNik: profile.employee_nik,
-          fullName: profile.full_name,
-        });
-        setBidCount(null);
-      } else {
+      if (!user || user.role !== "bidder") {
         setBidder(null);
         setBidCount(null);
+        setAuthLoading(false);
+        return;
+      }
+
+      setBidder({
+        id: user.id,
+        employeeNik: "",
+        fullName: user.fullName,
+      });
+
+      // Load user's bids for this item via bidder/bids
+      const bidsRes = await apiFetch<{
+        bids: { itemId?: string; item_id?: string; item?: { id: string } }[];
+      }>("/api/bidder/bids", { method: "GET", token });
+
+      if (bidsRes.ok && Array.isArray(bidsRes.data?.bids)) {
+        const count = bidsRes.data.bids.filter((b) => {
+          const id = b.item_id ?? b.itemId ?? b.item?.id;
+          return id === item.id;
+        }).length;
+        setBidCount(count);
+      } else {
+        setBidCount(0);
       }
 
       setAuthLoading(false);
     }
 
-    loadBidder();
-
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange(() => {
-      loadBidder();
+    void loadBidder();
+    return onAuthChange(() => {
+      void loadBidder();
     });
-
-    return () => subscription.unsubscribe();
-  }, [supabase]);
-
-  async function loadBidCount(bidderId: string) {
-    const { count, error } = await supabase
-      .from("bids")
-      .select("*", { count: "exact", head: true })
-      .eq("item_id", item.id)
-      .eq("bidder_id", bidderId)
-      .neq("status", "cancelled");
-
-    if (error) {
-      setBidCount(null);
-      return;
-    }
-
-    setBidCount(count ?? 0);
-  }
-
-  useEffect(() => {
-    if (bidder?.id) {
-      loadBidCount(bidder.id);
-    }
-  }, [bidder?.id, item.id]);
+  }, [item.id]);
 
   useEffect(() => {
     setCurrentPrice(item.current_price);
@@ -164,7 +141,8 @@ export function BidForm({
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
 
-    if (!bidder) {
+    const token = getClientToken();
+    if (!bidder || !token) {
       toast.error("Silakan login terlebih dahulu");
       return;
     }
@@ -190,19 +168,27 @@ export function BidForm({
     }
 
     setLoading(true);
-    const { data, error } = await supabase.rpc("place_authenticated_bid", {
-      p_item_id: item.id,
-      p_amount: amount,
-    });
+    const res = await apiFetch<{ message?: string }>(
+      `/api/items/${item.id}/bids`,
+      {
+        method: "POST",
+        token,
+        body: { amount },
+      }
+    );
     setLoading(false);
 
-    if (error) {
-      toast.error(error.message);
+    if (!res.ok) {
+      if (res.status === 401) {
+        clearSession();
+        toast.error("Sesi berakhir. Silakan login ulang.");
+        return;
+      }
+      toast.error(res.error ?? "Gagal mengirim penawaran");
       return;
     }
 
-    const result = data as { message?: string };
-    toast.success(result?.message ?? "Penawaran berhasil!");
+    toast.success(res.data?.message ?? "Penawaran berhasil!");
     setBidCount((count) => (count ?? 0) + 1);
     setCurrentPrice(amount);
     updateAmount(amount + item.bid_increment);
@@ -275,7 +261,7 @@ export function BidForm({
                 <div>
                   <p className="text-xs text-slate-500">NIK Karyawan</p>
                   <p className="font-mono text-sm font-semibold text-slate-900">
-                    {bidder.employeeNik}
+                    {bidder.employeeNik || "—"}
                   </p>
                 </div>
                 <div>

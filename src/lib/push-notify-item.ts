@@ -1,4 +1,4 @@
-import { createAdminClient } from "@/lib/supabase/admin";
+import { apiFetchServer } from "@/lib/api-client";
 import { getCompanyCodeById, sendPushToCompany } from "@/lib/push-notify-shared";
 import type { AuctionItem } from "@/lib/database.types";
 
@@ -39,22 +39,28 @@ export function parseAuctionItemInsertPayload(body: unknown): AuctionItemInsertR
   };
 }
 
+type ItemDetailResponse = {
+  period?: {
+    id: string;
+    status: string;
+    company_id: string;
+  } | null;
+};
+
 export async function notifyNewAuctionItem(item: AuctionItemInsertRecord) {
   if (!NOTIFYABLE_ITEM_STATUSES.has(item.status)) {
     return { sent: 0, skipped: true, reason: "item_not_public" as const };
   }
 
-  const admin = createAdminClient();
-  const { data: period, error: periodError } = await admin
-    .from("auction_periods")
-    .select("id, status, company_id")
-    .eq("id", item.period_id)
-    .maybeSingle();
+  const res = await apiFetchServer<ItemDetailResponse>(`/api/items/${item.id}`, {
+    method: "GET",
+  });
 
-  if (periodError) {
-    throw new Error(periodError.message);
+  if (!res.ok) {
+    throw new Error(res.error ?? "Gagal memuat detail item");
   }
 
+  const period = res.data?.period;
   if (!period || period.status !== "active") {
     return { sent: 0, skipped: true, reason: "period_not_active" as const };
   }

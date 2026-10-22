@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { createClient } from "@/lib/supabase/client";
-import { AuctionPeriod, Database } from "@/lib/database.types";
+import { apiFetch, getClientToken } from "@/lib/api-client";
+import { AuctionPeriod } from "@/lib/database.types";
 import { useAdminCompanyId } from "@/components/admin/admin-company-context";
 import { PeriodWinnerEmailBar } from "@/components/admin/period-winner-email-bar";
 import { Button } from "@/components/ui/button";
@@ -15,8 +15,16 @@ import { toast } from "sonner";
 import { Trophy, ArrowLeft, Download, Landmark, Package } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-type WinnerRow =
-  Database["public"]["Functions"]["get_period_winners"]["Returns"][number];
+type WinnerRow = {
+  item_id: string;
+  lot_number: string;
+  item_name: string;
+  starting_price: number;
+  last_price: number;
+  winner_name: string | null;
+  winner_alias: string | null;
+  photo_path: string | null;
+};
 
 type MobileView = "list" | "detail";
 
@@ -28,20 +36,19 @@ export default function AdminPemenangPage() {
   const [loadingWinners, setLoadingWinners] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [mobileView, setMobileView] = useState<MobileView>("list");
-  const supabase = createClient();
   const companyId = useAdminCompanyId();
 
   const selectedPeriod = periods.find((period) => period.id === selectedId) ?? null;
 
   async function loadPeriods() {
-    const { data } = await supabase
-      .from("auction_periods")
-      .select("*")
-      .eq("company_id", companyId)
-      .eq("status", "finished")
-      .order("end_at", { ascending: false });
+    const res = await apiFetch<{ periods: AuctionPeriod[] }>(
+      `/api/catalog/periods?company_id=${encodeURIComponent(companyId)}&status=finished`,
+      { method: "GET", token: getClientToken() }
+    );
 
-    const list = data ?? [];
+    const list = [...(res.data?.periods ?? [])].sort(
+      (a, b) => new Date(b.end_at).getTime() - new Date(a.end_at).getTime()
+    );
     setPeriods(list);
     if (list.length > 0 && !selectedId) {
       setSelectedId(list[0].id);
@@ -52,27 +59,33 @@ export default function AdminPemenangPage() {
 
   async function loadWinners(periodId: string) {
     setLoadingWinners(true);
-    const [{ data: winnerRows, error }, { data: banks }] = await Promise.all([
-      supabase.rpc("get_period_winners", { p_period_id: periodId }),
-      supabase
-        .from("auction_bank_accounts")
-        .select("*, banks(id, code, name)")
-        .eq("company_id", companyId)
-        .eq("is_active", true)
-        .order("created_at", { ascending: true }),
+    const [winnersRes, banksRes] = await Promise.all([
+      apiFetch<{ winners: WinnerRow[] }>(
+        `/api/items/meta/period-winners/${periodId}`,
+        { method: "GET", token: getClientToken() }
+      ),
+      apiFetch<{ accounts: BankAccountWithBank[] }>(
+        `/api/catalog/bank-accounts?company_id=${encodeURIComponent(companyId)}`,
+        { method: "GET", token: getClientToken() }
+      ),
     ]);
 
     setLoadingWinners(false);
 
-    if (error) {
-      toast.error(error.message);
+    if (!winnersRes.ok) {
+      toast.error(winnersRes.error ?? "Gagal memuat pemenang");
       setWinners([]);
       setBankAccounts([]);
       return;
     }
 
-    setWinners(winnerRows ?? []);
-    setBankAccounts((banks ?? []) as BankAccountWithBank[]);
+    setWinners(winnersRes.data?.winners ?? []);
+    setBankAccounts(
+      (banksRes.data?.accounts ?? []).map((a) => ({
+        ...a,
+        banks: a.banks ?? (a as { bank?: BankAccountWithBank["banks"] }).bank ?? null,
+      }))
+    );
   }
 
   useEffect(() => {
@@ -101,7 +114,7 @@ export default function AdminPemenangPage() {
     if (!selectedPeriod) return;
     setExporting(true);
     try {
-      await downloadWinnerExcel(supabase, selectedPeriod);
+      await downloadWinnerExcel(selectedPeriod);
       toast.success("Excel pemenang berhasil diunduh");
     } catch (error) {
       toast.error(

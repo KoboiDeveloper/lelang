@@ -1,24 +1,36 @@
-import { createClient } from "@/lib/supabase/client";
-import type { SupabaseClient } from "@supabase/supabase-js";
+import { apiFetch, getClientToken } from "@/lib/api-client";
 import type { Database } from "@/lib/database.types";
 
 export type ItemCategory = Database["public"]["Tables"]["item_categories"]["Row"];
 
-type AppSupabase = SupabaseClient<Database>;
+type CategoriesResponse = {
+  categories: Array<{
+    id: string;
+    name: string;
+    sortOrder?: number;
+    sort_order?: number;
+    isActive?: boolean;
+    is_active?: boolean;
+    createdAt?: string;
+    created_at?: string;
+  }>;
+};
 
-export async function fetchItemCategories(
-  supabase?: AppSupabase
-): Promise<ItemCategory[]> {
-  const client = supabase ?? createClient();
-  const { data, error } = await client
-    .from("item_categories")
-    .select("id, name, sort_order, is_active, created_at")
-    .eq("is_active", true)
-    .order("sort_order", { ascending: true });
+export async function fetchItemCategories(): Promise<ItemCategory[]> {
+  const res = await apiFetch<CategoriesResponse>("/api/catalog/categories", {
+    method: "GET",
+    token: getClientToken(),
+  });
 
-  if (error) {
-    throw error;
+  if (!res.ok) {
+    throw new Error(res.error ?? "Gagal memuat kategori");
   }
 
-  return data ?? [];
+  return (res.data?.categories ?? []).map((c) => ({
+    id: c.id,
+    name: c.name,
+    sort_order: c.sort_order ?? c.sortOrder ?? 0,
+    is_active: c.is_active ?? c.isActive ?? true,
+    created_at: c.created_at ?? c.createdAt ?? new Date(0).toISOString(),
+  }));
 }

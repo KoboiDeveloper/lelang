@@ -1,58 +1,134 @@
-import type { SupabaseClient } from "@supabase/supabase-js";
-import { AuctionPeriod, Database } from "@/lib/database.types";
+import { apiFetch, getClientToken } from "@/lib/api-client";
+import { AuctionPeriod, BankAccountWithBank } from "@/lib/database.types";
 import { formatDateTime } from "@/lib/format";
 import { getBankName } from "@/lib/bank-utils";
 
-type WinnerRow =
-  Database["public"]["Functions"]["get_period_winners"]["Returns"][number];
+type WinnerRow = {
+  item_id: string;
+  lot_number: string;
+  item_name: string;
+  starting_price: number;
+  last_price: number;
+  winner_name: string | null;
+  winner_alias: string | null;
+  photo_path: string | null;
+};
 
-type WinnerNotificationRow =
-  Database["public"]["Functions"]["get_period_winner_notifications"]["Returns"][number];
+type WinnerNotificationRow = {
+  bidder_id: string;
+  bidder_email: string | null;
+  bidder_name: string;
+  public_alias: string;
+  item_id: string;
+  lot_number: string;
+  item_name: string;
+  last_price: number;
+};
 
-export async function fetchWinnerExportData(
-  supabase: SupabaseClient<Database>,
-  period: AuctionPeriod
-) {
-  const [{ data: company }, { data: winners, error: winnersError }, { data: notifications }] =
+type CompaniesResponse = {
+  companies: Array<{ id: string; short_name: string; name: string }>;
+};
+
+type WinnersResponse = { winners: WinnerRow[] };
+type NotificationsResponse = { notifications: WinnerNotificationRow[] };
+type BankAccountsResponse = {
+  accounts: Array<{
+    id: string;
+    company_id?: string;
+    companyId?: string;
+    bank_id?: string;
+    bankId?: string;
+    account_holder?: string;
+    accountHolder?: string;
+    account_number?: string;
+    accountNumber?: string;
+    is_active?: boolean;
+    isActive?: boolean;
+    notes?: string | null;
+    created_at?: string;
+    createdAt?: string;
+    created_by?: string | null;
+    createdBy?: string | null;
+    updated_at?: string;
+    updatedAt?: string;
+    updated_by?: string | null;
+    updatedBy?: string | null;
+    banks?: { id: string; code: string; name: string } | null;
+    bank?: { id: string; code: string; name: string } | null;
+  }>;
+};
+
+function mapBankAccounts(
+  accounts: BankAccountsResponse["accounts"],
+  companyId: string
+): BankAccountWithBank[] {
+  return accounts.map((a) => {
+    const bank = a.banks ?? a.bank ?? null;
+    return {
+      id: a.id,
+      company_id: a.company_id ?? a.companyId ?? companyId,
+      bank_id: a.bank_id ?? a.bankId ?? bank?.id ?? "",
+      account_holder: a.account_holder ?? a.accountHolder ?? "",
+      account_number: a.account_number ?? a.accountNumber ?? "",
+      is_active: a.is_active ?? a.isActive ?? true,
+      notes: a.notes ?? null,
+      created_at: a.created_at ?? a.createdAt ?? new Date(0).toISOString(),
+      created_by: a.created_by ?? a.createdBy ?? null,
+      updated_at: a.updated_at ?? a.updatedAt ?? new Date(0).toISOString(),
+      updated_by: a.updated_by ?? a.updatedBy ?? null,
+      banks: bank ? { id: bank.id, code: bank.code, name: bank.name } : null,
+    };
+  });
+}
+
+export async function fetchWinnerExportData(period: AuctionPeriod) {
+  const token = getClientToken();
+
+  const [companiesRes, winnersRes, notificationsRes, banksRes] =
     await Promise.all([
-      supabase
-        .from("companies")
-        .select("short_name, name")
-        .eq("id", period.company_id)
-        .maybeSingle(),
-      supabase.rpc("get_period_winners", { p_period_id: period.id }),
-      supabase.rpc("get_period_winner_notifications", { p_period_id: period.id }),
+      apiFetch<CompaniesResponse>("/api/catalog/companies", {
+        method: "GET",
+        token,
+      }),
+      apiFetch<WinnersResponse>(
+        `/api/items/meta/period-winners/${period.id}`,
+        { method: "GET", token }
+      ),
+      apiFetch<NotificationsResponse>(
+        `/api/items/meta/period-winner-notifications/${period.id}`,
+        { method: "GET", token }
+      ),
+      apiFetch<BankAccountsResponse>(
+        `/api/catalog/bank-accounts?company_id=${encodeURIComponent(period.company_id)}`,
+        { method: "GET", token }
+      ),
     ]);
 
-  if (winnersError) {
-    throw new Error(winnersError.message);
+  if (!winnersRes.ok) {
+    throw new Error(winnersRes.error ?? "Gagal memuat pemenang");
+  }
+  if (!banksRes.ok) {
+    throw new Error(banksRes.error ?? "Gagal memuat rekening bank");
   }
 
-  const { data: bankAccounts, error: bankError } = await supabase
-    .from("auction_bank_accounts")
-    .select("*, banks(id, code, name)")
-    .eq("company_id", period.company_id)
-    .eq("is_active", true)
-    .order("created_at", { ascending: true });
-
-  if (bankError) {
-    throw new Error(bankError.message);
-  }
+  const company =
+    (companiesRes.data?.companies ?? []).find((c) => c.id === period.company_id) ??
+    null;
 
   return {
     period,
     company,
-    winners: (winners ?? []) as WinnerRow[],
-    notifications: (notifications ?? []) as WinnerNotificationRow[],
-    bankAccounts: bankAccounts ?? [],
+    winners: winnersRes.data?.winners ?? [],
+    notifications: notificationsRes.data?.notifications ?? [],
+    bankAccounts: mapBankAccounts(
+      banksRes.data?.accounts ?? [],
+      period.company_id
+    ),
   };
 }
 
-export async function downloadWinnerExcel(
-  supabase: SupabaseClient<Database>,
-  period: AuctionPeriod
-) {
-  const data = await fetchWinnerExportData(supabase, period);
+export async function downloadWinnerExcel(period: AuctionPeriod) {
+  const data = await fetchWinnerExportData(period);
   const XLSX = await import("xlsx");
 
   const infoRows = [

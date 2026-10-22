@@ -1,4 +1,4 @@
-import { createAdminClient } from "@/lib/supabase/admin";
+import { apiFetchServer } from "@/lib/api-client";
 import type { PushSubscription } from "@/lib/database.types";
 
 export type PushSubscriptionInput = {
@@ -8,95 +8,67 @@ export type PushSubscriptionInput = {
   userAgent?: string | null;
 };
 
-export async function upsertPushSubscription(
-  companyId: string,
-  subscription: PushSubscriptionInput
-) {
-  const admin = createAdminClient();
+type SubscriptionsResponse = {
+  subscriptions: PushSubscription[];
+};
 
-  const { error } = await admin.from("push_subscriptions").upsert(
-    {
-      company_id: companyId,
-      endpoint: subscription.endpoint,
+function subscribeBody(subscription: PushSubscriptionInput) {
+  return {
+    endpoint: subscription.endpoint,
+    keys: {
       p256dh: subscription.p256dh,
       auth: subscription.auth,
-      user_agent: subscription.userAgent ?? null,
     },
-    { onConflict: "endpoint,company_id" }
-  );
-
-  if (error) {
-    throw new Error(error.message);
-  }
+    userAgent: subscription.userAgent ?? null,
+  };
 }
 
+/** BE upserts the endpoint for every company in one call. */
 export async function upsertPushSubscriptionForAllCompanies(
   subscription: PushSubscriptionInput
 ) {
-  const admin = createAdminClient();
-  const { data: companies, error } = await admin
-    .from("companies")
-    .select("id")
-    .order("code", { ascending: true });
-
-  if (error) {
-    throw new Error(error.message);
+  const res = await apiFetchServer<{ ok: boolean }>("/api/push/subscribe", {
+    method: "POST",
+    body: subscribeBody(subscription),
+  });
+  if (!res.ok) {
+    throw new Error(res.error ?? "Gagal menyimpan push subscription");
   }
+}
 
-  if (!companies?.length) {
-    throw new Error("Tidak ada perusahaan yang terdaftar");
+export async function upsertPushSubscription(
+  _companyId: string,
+  subscription: PushSubscriptionInput
+) {
+  await upsertPushSubscriptionForAllCompanies(subscription);
+}
+
+export async function deletePushSubscriptionByEndpoint(endpoint: string) {
+  const res = await apiFetchServer<{ ok: boolean }>("/api/push/unsubscribe", {
+    method: "POST",
+    body: { endpoint },
+  });
+  if (!res.ok) {
+    throw new Error(res.error ?? "Gagal menghapus push subscription");
   }
-
-  for (const company of companies) {
-    await upsertPushSubscription(company.id, subscription);
-  }
-
-  return companies.length;
 }
 
 export async function deletePushSubscription(
-  companyId: string,
+  _companyId: string,
   endpoint: string
 ) {
-  const admin = createAdminClient();
-
-  const { error } = await admin
-    .from("push_subscriptions")
-    .delete()
-    .eq("company_id", companyId)
-    .eq("endpoint", endpoint);
-
-  if (error) {
-    throw new Error(error.message);
-  }
+  await deletePushSubscriptionByEndpoint(endpoint);
 }
 
 export async function fetchPushSubscriptionsByCompany(
   companyId: string
 ): Promise<PushSubscription[]> {
-  const admin = createAdminClient();
-
-  const { data, error } = await admin
-    .from("push_subscriptions")
-    .select("*")
-    .eq("company_id", companyId);
-
-  if (error) {
-    throw new Error(error.message);
+  const res = await apiFetchServer<SubscriptionsResponse>(
+    `/api/push/subscriptions?company_id=${encodeURIComponent(companyId)}`,
+    { method: "GET" }
+  );
+  if (!res.ok) {
+    throw new Error(res.error ?? "Gagal memuat push subscriptions");
   }
-
-  return data ?? [];
-}
-
-export async function deletePushSubscriptionByEndpoint(endpoint: string) {
-  const admin = createAdminClient();
-
-  const { error } = await admin
-    .from("push_subscriptions")
-    .delete()
-    .eq("endpoint", endpoint);
-
-  if (error) {
-    throw new Error(error.message);
-  }
+  return res.data?.subscriptions ?? [];
 }

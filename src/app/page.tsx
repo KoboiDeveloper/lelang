@@ -1,4 +1,3 @@
-import { createClient } from "@/lib/supabase/server";
 import { Navbar } from "@/components/navbar";
 import { Footer } from "@/components/footer";
 import { HomeCatalog } from "@/components/home/home-catalog";

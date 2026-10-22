@@ -3,14 +3,13 @@
 import { useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { createClient } from "@/lib/supabase/client";
 import { BidderAuthShell } from "@/components/auth/bidder-auth-shell";
 import { Button } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
 import { toast } from "sonner";
-import { ensureBidderProfile } from "@/lib/bidder-auth";
 import { isStaffRole } from "@/lib/roles";
+import { loginWithPassword } from "@/lib/session";
 import { Eye, EyeOff } from "lucide-react";
 
 export default function LoginForm() {
@@ -21,40 +20,22 @@ export default function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const redirect = searchParams.get("redirect") ?? "/";
-  const supabase = createClient();
 
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
 
-    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) {
-      setLoading(false);
-      toast.error(error.message);
-      return;
-    }
-
-    const { error: profileSyncError } = await ensureBidderProfile(
-      supabase,
-      data.user
-    );
-
-    if (profileSyncError) {
-      setLoading(false);
-      toast.error(profileSyncError.message);
-      return;
-    }
-
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", data.user.id)
-      .maybeSingle();
-
+    const result = await loginWithPassword(email, password);
     setLoading(false);
+
+    if ("error" in result) {
+      toast.error(result.error);
+      return;
+    }
+
     toast.success("Login berhasil");
 
-    const destination = isStaffRole(profile?.role) ? "/admin" : redirect;
+    const destination = isStaffRole(result.user.role) ? "/admin" : redirect;
 
     router.push(destination);
     router.refresh();

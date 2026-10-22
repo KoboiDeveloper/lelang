@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { createClient } from "@/lib/supabase/client";
+import { apiFetch, getClientToken } from "@/lib/api-client";
 import { formatRupiah, formatDateTime } from "@/lib/format";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -19,99 +19,62 @@ type BidReport = {
   bidder_profiles: { public_alias: string; full_name: string } | null;
 };
 
-type AuditEntry = {
-  id: number;
-  action: string;
-  table_name: string;
-  created_at: string;
+type BidsResponse = {
+  bids: BidReport[];
+  total: number;
 };
-
-const BID_SELECT =
-  "id, amount, status, created_at, auction_items!inner(lot_number, item_name, auction_periods!inner(company_id)), bidder_profiles(public_alias, full_name)";
 
 export default function ReportsPage() {
   const [bids, setBids] = useState<BidReport[]>([]);
   const [bidsTotal, setBidsTotal] = useState(0);
   const [bidsPage, setBidsPage] = useState(1);
   const [bidsLoading, setBidsLoading] = useState(true);
-  const [audits, setAudits] = useState<AuditEntry[]>([]);
-  const [auditsTotal, setAuditsTotal] = useState(0);
-  const [auditsPage, setAuditsPage] = useState(1);
-  const [auditsLoading, setAuditsLoading] = useState(true);
   const [exporting, setExporting] = useState(false);
-  const supabase = createClient();
   const companyId = useAdminCompanyId();
 
   useEffect(() => {
     setBidsPage(1);
-    setAuditsPage(1);
   }, [companyId]);
 
   useEffect(() => {
     async function loadBids() {
       setBidsLoading(true);
       const from = (bidsPage - 1) * DEFAULT_PAGE_SIZE;
-      const to = from + DEFAULT_PAGE_SIZE - 1;
+      const params = new URLSearchParams({
+        company_id: companyId,
+        offset: String(from),
+        limit: String(DEFAULT_PAGE_SIZE),
+      });
 
-      const { data, count, error } = await supabase
-        .from("bids")
-        .select(BID_SELECT, { count: "exact" })
-        .eq("auction_items.auction_periods.company_id", companyId)
-        .order("created_at", { ascending: false })
-        .range(from, to);
+      const res = await apiFetch<BidsResponse>(`/api/admin/bids?${params}`, {
+        method: "GET",
+        token: getClientToken(),
+      });
 
       setBidsLoading(false);
 
-      if (error) {
+      if (!res.ok) {
         setBids([]);
         setBidsTotal(0);
         return;
       }
 
-      setBids((data ?? []) as unknown as BidReport[]);
-      setBidsTotal(count ?? 0);
+      setBids(res.data?.bids ?? []);
+      setBidsTotal(res.data?.total ?? 0);
     }
 
     loadBids();
   }, [companyId, bidsPage]);
 
-  useEffect(() => {
-    async function loadAudits() {
-      setAuditsLoading(true);
-      const from = (auditsPage - 1) * DEFAULT_PAGE_SIZE;
-      const to = from + DEFAULT_PAGE_SIZE - 1;
-
-      const { data, count, error } = await supabase
-        .from("audit_logs")
-        .select("id, action, table_name, created_at", { count: "exact" })
-        .order("created_at", { ascending: false })
-        .range(from, to);
-
-      setAuditsLoading(false);
-
-      if (error) {
-        setAudits([]);
-        setAuditsTotal(0);
-        return;
-      }
-
-      setAudits(data ?? []);
-      setAuditsTotal(count ?? 0);
-    }
-
-    loadAudits();
-  }, [auditsPage]);
-
   async function exportCsv() {
     setExporting(true);
-    const { data } = await supabase
-      .from("bids")
-      .select(BID_SELECT)
-      .eq("auction_items.auction_periods.company_id", companyId)
-      .order("created_at", { ascending: false });
+    const res = await apiFetch<BidsResponse>(
+      `/api/admin/bids?company_id=${encodeURIComponent(companyId)}&offset=0&limit=500`,
+      { method: "GET", token: getClientToken() }
+    );
     setExporting(false);
 
-    const allBids = (data ?? []) as unknown as BidReport[];
+    const allBids = res.data?.bids ?? [];
     const header = "Lot,Barang,Bidder,Alias,Nominal,Status,Waktu\n";
     const rows = allBids
       .map((b) => {
@@ -137,7 +100,7 @@ export default function ReportsPage() {
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-xl font-bold text-slate-900 sm:text-2xl">Laporan</h1>
-          <p className="text-sm text-slate-500">Riwayat penawaran dan audit log</p>
+          <p className="text-sm text-slate-500">Riwayat penawaran</p>
         </div>
         <Button
           variant="primary"
@@ -204,44 +167,6 @@ export default function ReportsPage() {
                 pageSize={DEFAULT_PAGE_SIZE}
                 total={bidsTotal}
                 onPageChange={setBidsPage}
-              />
-            </>
-          )}
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Audit Log ({auditsTotal})</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {auditsLoading ? (
-            <p className="text-sm text-slate-500">Memuat log...</p>
-          ) : auditsTotal === 0 ? (
-            <p className="text-sm text-slate-500">Belum ada log.</p>
-          ) : (
-            <>
-              <div className="space-y-2">
-                {audits.map((log) => (
-                  <div
-                    key={log.id}
-                    className="flex flex-col gap-1 rounded-lg border border-[var(--border)] bg-slate-50 px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between"
-                  >
-                    <div>
-                      <span className="font-medium text-slate-900">{log.action}</span>
-                      <span className="ml-2 text-slate-500">{log.table_name}</span>
-                    </div>
-                    <span className="text-slate-500">
-                      {formatDateTime(log.created_at)}
-                    </span>
-                  </div>
-                ))}
-              </div>
-              <Pagination
-                page={auditsPage}
-                pageSize={DEFAULT_PAGE_SIZE}
-                total={auditsTotal}
-                onPageChange={setAuditsPage}
               />
             </>
           )}

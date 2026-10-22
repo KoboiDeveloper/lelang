@@ -16,7 +16,7 @@ import {
 import { Profile } from "@/lib/database.types";
 import { isStaffRole } from "@/lib/roles";
 import { cn } from "@/lib/utils";
-import { createClient } from "@/lib/supabase/client";
+import { clearSession } from "@/lib/session";
 import { useRouter } from "next/navigation";
 
 const publicLinks = [
@@ -42,7 +42,6 @@ export function MobileNavDrawer({
 }) {
   const pathname = usePathname();
   const router = useRouter();
-  const supabase = createClient();
 
   const withCompany = (href: string) =>
     companyCode ? `${href}?company=${companyCode}` : href;
@@ -51,7 +50,7 @@ export function MobileNavDrawer({
   const isBidder = profile?.role === "bidder";
 
   async function handleLogout() {
-    await supabase.auth.signOut();
+    clearSession();
     onClose();
     router.refresh();
     router.push("/");

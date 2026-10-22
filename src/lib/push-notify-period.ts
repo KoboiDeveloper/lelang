@@ -1,4 +1,3 @@
-import { createAdminClient } from "@/lib/supabase/admin";
 import { getCompanyCodeById, sendPushToCompany } from "@/lib/push-notify-shared";
 import type { AuctionPeriod } from "@/lib/database.types";
 

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { createClient } from "@/lib/supabase/client";
+import { apiFetch, getClientToken } from "@/lib/api-client";
 import { BidderProfile } from "@/lib/database.types";
 import { Button } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/input";
@@ -9,10 +9,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { BidderBidsPanel } from "@/components/admin/bidder-bids-panel";
 import { useAdminCompanyId } from "@/components/admin/admin-company-context";
-import {
-  countCompanyBidsByBidder,
-  fetchBidderIdsWithCompanyBids,
-} from "@/lib/admin-bidders";
+import { fetchCompanyBiddersWithBids } from "@/lib/admin-bidders";
 import { toast } from "sonner";
 import { Plus, Users, ArrowLeft } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -107,54 +104,17 @@ export default function BiddersMasterDetailPage() {
   const [rightPanel, setRightPanel] = useState<RightPanel>("bids");
   const [mobileView, setMobileView] = useState<MobileView>("list");
   const [loading, setLoading] = useState(false);
-  const supabase = createClient();
   const companyId = useAdminCompanyId();
 
   const selectedBidder = bidders.find((bidder) => bidder.id === selectedId) ?? null;
 
-  async function loadBidCounts(bidderIds: string[]) {
-    if (bidderIds.length === 0) {
-      setBidCountByBidder({});
-      return;
-    }
-
-    try {
-      const counts = await countCompanyBidsByBidder(supabase, companyId, bidderIds);
-      setBidCountByBidder(counts);
-    } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "Gagal memuat jumlah penawaran"
-      );
-      setBidCountByBidder({});
-    }
-  }
-
   async function loadBidders() {
     try {
-      const bidderIds = await fetchBidderIdsWithCompanyBids(supabase, companyId);
+      const { bidders: list, bidCounts } =
+        await fetchCompanyBiddersWithBids(companyId);
 
-      if (bidderIds.length === 0) {
-        setBidders([]);
-        setBidCountByBidder({});
-        setSelectedId(null);
-        return;
-      }
-
-      const { data, error } = await supabase
-        .from("bidder_profiles")
-        .select(
-          "id, employee_nik, full_name, public_alias, is_active, created_at, updated_at, auth_user_id"
-        )
-        .in("id", bidderIds)
-        .order("created_at", { ascending: false });
-
-      if (error) {
-        throw error;
-      }
-
-      const list = (data ?? []) as BidderProfile[];
       setBidders(list);
-      await loadBidCounts(bidderIds);
+      setBidCountByBidder(bidCounts);
 
       setSelectedId((current) => {
         if (current && list.some((bidder) => bidder.id === current)) {
@@ -203,18 +163,23 @@ export default function BiddersMasterDetailPage() {
     e.preventDefault();
     setLoading(true);
 
-    const { error } = await supabase.rpc("upsert_bidder", {
-      p_employee_nik: form.employee_nik.trim(),
-      p_ktp: form.ktp.trim(),
-      p_full_name: form.full_name.trim(),
-      p_public_alias: form.public_alias.trim(),
-      p_is_active: form.is_active,
+    const res = await apiFetch("/api/admin/bidders", {
+      method: "POST",
+      token: getClientToken(),
+      body: {
+        employee_nik: form.employee_nik.trim(),
+        ktp: form.ktp.trim(),
+        full_name: form.full_name.trim(),
+        public_alias: form.public_alias.trim(),
+        is_active: form.is_active,
+        company_id: companyId,
+      },
     });
 
     setLoading(false);
 
-    if (error) {
-      toast.error(error.message);
+    if (!res.ok) {
+      toast.error(res.error ?? "Gagal menyimpan bidder");
       return;
     }
 

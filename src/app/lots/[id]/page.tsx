@@ -1,5 +1,5 @@
 import { notFound } from "next/navigation";
-import { createClient } from "@/lib/supabase/server";
+import { apiFetchServer } from "@/lib/api-client";
 import { Navbar } from "@/components/navbar";
 import { Footer } from "@/components/footer";
 import { BidForm } from "@/components/bid-form";
@@ -17,6 +17,13 @@ import { ScrollToTopOnMount } from "@/components/scroll-to-top-on-mount";
 import { fetchNextLotItem } from "@/lib/lot-navigation";
 import { buildCatalogReturnHref } from "@/lib/catalog-view-state";
 import { fetchCompanyById } from "@/lib/companies";
+import type { AuctionItem, AuctionPeriod, ItemPhoto } from "@/lib/database.types";
+
+type ItemDetailResponse = {
+  item: AuctionItem;
+  photos: ItemPhoto[];
+  period: AuctionPeriod;
+};
 
 export default async function LotDetailPage({
   params,
@@ -28,33 +35,21 @@ export default async function LotDetailPage({
   const { id } = await params;
   const { category: categoryParam } = await searchParams;
   const category = categoryParam?.trim() || null;
-  const supabase = await createClient();
 
-  const { data: item } = await supabase
-    .from("auction_items")
-    .select("*")
-    .eq("id", id)
-    .maybeSingle();
+  const res = await apiFetchServer<ItemDetailResponse>(`/api/items/${id}`, {
+    method: "GET",
+    next: { revalidate: 10 },
+  });
 
-  if (!item) notFound();
+  if (!res.ok || !res.data?.item) notFound();
 
-  const [{ data: photos }, { data: period }, nextItem] = await Promise.all([
-    supabase
-      .from("item_photos")
-      .select("*")
-      .eq("item_id", id)
-      .order("sort_order"),
-    supabase
-      .from("auction_periods")
-      .select("*")
-      .eq("id", item.period_id)
-      .maybeSingle(),
-    fetchNextLotItem({
-      periodId: item.period_id,
-      currentLotNumber: item.lot_number,
-      category,
-    }),
-  ]);
+  const { item, photos, period } = res.data;
+
+  const nextItem = await fetchNextLotItem({
+    periodId: item.period_id,
+    currentLotNumber: item.lot_number,
+    category,
+  });
 
   const company = period
     ? await fetchCompanyById(period.company_id)

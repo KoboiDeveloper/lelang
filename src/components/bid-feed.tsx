@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { createClient } from "@/lib/supabase/client";
+import { useCallback, useEffect, useState } from "react";
+import { apiFetch, getClientToken } from "@/lib/api-client";
 import { BidFeedEntry } from "@/lib/database.types";
 import { formatRupiah, formatDateTime } from "@/lib/format";
 import { subscribeItemBidUpdates } from "@/lib/bid-events";
@@ -11,42 +11,32 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 export function BidFeed({ itemId }: { itemId: string }) {
   const [bids, setBids] = useState<BidFeedEntry[]>([]);
   const [loading, setLoading] = useState(true);
-  const supabase = useMemo(() => createClient(), []);
 
   const loadBids = useCallback(async () => {
-    const { data, error } = await supabase.rpc("get_public_bid_feed", {
-      p_item_id: itemId,
-    });
-    if (!error && data) setBids(data);
+    const res = await apiFetch<{ bids: BidFeedEntry[] }>(
+      `/api/items/${itemId}/bids`,
+      { method: "GET", token: getClientToken() }
+    );
+    if (res.ok && res.data?.bids) setBids(res.data.bids);
     setLoading(false);
-  }, [itemId, supabase]);
+  }, [itemId]);
 
   useEffect(() => {
-    loadBids();
+    void loadBids();
 
     const unsubscribe = subscribeItemBidUpdates(itemId, () => {
-      loadBids();
+      void loadBids();
     });
 
-    const channel = supabase
-      .channel(`bids-${itemId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "bids",
-          filter: `item_id=eq.${itemId}`,
-        },
-        () => loadBids()
-      )
-      .subscribe();
+    const interval = setInterval(() => {
+      void loadBids();
+    }, 3000);
 
     return () => {
       unsubscribe();
-      supabase.removeChannel(channel);
+      clearInterval(interval);
     };
-  }, [itemId, loadBids, supabase]);
+  }, [itemId, loadBids]);
 
   return (
     <Card>

@@ -1,35 +1,57 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
-import { UserRole } from "@/lib/database.types";
+import { apiFetchServer } from "@/lib/api-client";
+import { Profile, UserRole } from "@/lib/database.types";
 import { STAFF_ROLES } from "@/lib/roles";
+
+type MeResponse = {
+  user?: {
+    id: string;
+    email: string;
+    role: string;
+    companyId: string | null;
+    fullName: string;
+    username: string;
+  };
+};
+
+function toProfile(user: NonNullable<MeResponse["user"]>): Pick<
+  Profile,
+  "role" | "full_name" | "company_id"
+> & { id: string } {
+  return {
+    id: user.id,
+    role: user.role,
+    full_name: user.fullName,
+    company_id: user.companyId ?? "",
+  };
+}
 
 export async function requireStaffApi(
   allowedRoles: UserRole[] = STAFF_ROLES
 ) {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const res = await apiFetchServer<MeResponse>("/api/auth/me", {
+    method: "GET",
+    cache: "no-store",
+  });
 
-  if (!user) {
+  if (!res.ok || !res.data?.user) {
     return {
       error: NextResponse.json({ error: "Unauthorized" }, { status: 401 }),
     } as const;
   }
 
-  const { data: profile } = await supabase
-    .from("profiles")
-    .select("role, full_name, company_id")
-    .eq("id", user.id)
-    .maybeSingle();
+  const profile = toProfile(res.data.user);
 
-  if (!profile || !allowedRoles.includes(profile.role as UserRole)) {
+  if (!allowedRoles.includes(profile.role as UserRole)) {
     return {
       error: NextResponse.json({ error: "Forbidden" }, { status: 403 }),
     } as const;
   }
 
-  return { profile, user, supabase } as const;
+  return {
+    profile,
+    user: { id: res.data.user.id, email: res.data.user.email },
+  } as const;
 }
 
 export async function requireAmsStaffApi(
@@ -38,11 +60,13 @@ export async function requireAmsStaffApi(
   const auth = await requireStaffApi(allowedRoles);
   if ("error" in auth) return auth;
 
-  const { data: company } = await auth.supabase
-    .from("companies")
-    .select("code")
-    .eq("id", auth.profile.company_id)
-    .maybeSingle();
+  const companies = await apiFetchServer<{
+    companies: { id: string; code: string }[];
+  }>("/api/catalog/companies", { method: "GET", cache: "no-store" });
+
+  const company = companies.data?.companies?.find(
+    (c) => c.id === auth.profile.company_id
+  );
 
   if (company?.code !== "ams") {
     return {

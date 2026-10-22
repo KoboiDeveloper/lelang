@@ -1,14 +1,22 @@
-import type { SupabaseClient } from "@supabase/supabase-js";
 import type ExcelJS from "exceljs";
+import { apiFetch, getClientToken } from "@/lib/api-client";
 import {
   AuctionItem,
   AuctionPeriod,
-  Database,
+  ItemPhoto,
 } from "@/lib/database.types";
 import { formatDateTime, getPhotoUrl } from "@/lib/format";
 
-type WinnerRow =
-  Database["public"]["Functions"]["get_period_winners"]["Returns"][number];
+type WinnerRow = {
+  item_id: string;
+  lot_number: string;
+  item_name: string;
+  starting_price: number;
+  last_price: number;
+  winner_name: string | null;
+  winner_alias: string | null;
+  photo_path: string | null;
+};
 
 type BidExportRow = {
   id: string;
@@ -21,6 +29,29 @@ type BidExportRow = {
     public_alias: string;
     employee_nik: string;
   } | null;
+};
+
+type ItemsPageResponse = {
+  items: Array<{
+    item: AuctionItem;
+    photos: ItemPhoto[];
+    bidCount: number;
+  }>;
+  hasMore: boolean;
+  total: number;
+};
+
+type CompaniesResponse = {
+  companies: Array<{ id: string; short_name: string; name: string }>;
+};
+
+type BidsResponse = {
+  bids: BidExportRow[];
+  total: number;
+};
+
+type WinnersResponse = {
+  winners: WinnerRow[];
 };
 
 const STATUS_LABELS: Record<string, string> = {
@@ -90,90 +121,91 @@ export type PeriodExcelExportOptions = {
 };
 
 export async function fetchPeriodExportData(
-  supabase: SupabaseClient<Database>,
   period: AuctionPeriod,
   category: string | null = null,
   _options: PeriodExcelExportOptions = {}
 ) {
-  let itemsQuery = supabase
-    .from("auction_items")
-    .select("*")
-    .eq("period_id", period.id)
-    .order("lot_number");
+  const token = getClientToken();
 
+  const itemsParams = new URLSearchParams({
+    period_id: period.id,
+    offset: "0",
+    limit: "1000",
+  });
   if (category && category !== "all") {
-    if (category === "Lainnya") {
-      itemsQuery = itemsQuery.or("category.eq.Lainnya,category.is.null");
-    } else {
-      itemsQuery = itemsQuery.eq("category", category);
-    }
+    itemsParams.set("category", category);
   }
 
-  const [{ data: items, error: itemsError }, { data: company }] =
-    await Promise.all([
-      itemsQuery,
-      supabase
-        .from("companies")
-        .select("short_name, name")
-        .eq("id", period.company_id)
-        .maybeSingle(),
-    ]);
+  const [itemsRes, companiesRes] = await Promise.all([
+    apiFetch<ItemsPageResponse>(`/api/items?${itemsParams.toString()}`, {
+      method: "GET",
+      token,
+    }),
+    apiFetch<CompaniesResponse>("/api/catalog/companies", {
+      method: "GET",
+      token,
+    }),
+  ]);
 
-  if (itemsError) {
-    throw new Error(itemsError.message);
+  if (!itemsRes.ok) {
+    throw new Error(itemsRes.error ?? "Gagal memuat barang periode");
   }
 
-  const periodItems = items ?? [];
+  const rows = itemsRes.data?.items ?? [];
+  const periodItems = rows.map((row) => row.item);
   const itemIds = periodItems.map((item) => item.id);
+
+  const company =
+    (companiesRes.data?.companies ?? []).find((c) => c.id === period.company_id) ??
+    null;
 
   let bidCounts: Record<string, number> = {};
   let bids: BidExportRow[] = [];
   const photosByItem = new Map<string, string[]>();
 
+  for (const row of rows) {
+    bidCounts[row.item.id] = row.bidCount ?? 0;
+    const paths = (row.photos ?? [])
+      .slice(0, MAX_PHOTOS_IN_EXPORT)
+      .map((photo) => photo.storage_path);
+    if (paths.length > 0) {
+      photosByItem.set(row.item.id, paths);
+    }
+  }
+
   if (itemIds.length > 0) {
-    const [{ data: bidsData, error: bidsError }, { data: photosData }] =
-      await Promise.all([
-        supabase
-          .from("bids")
-          .select(
-            "id, item_id, amount, status, created_at, bidder_profiles(full_name, public_alias, employee_nik)"
-          )
-          .in("item_id", itemIds)
-          .order("created_at", { ascending: false }),
-        supabase
-          .from("item_photos")
-          .select("item_id, storage_path, sort_order")
-          .in("item_id", itemIds)
-          .order("sort_order"),
-      ]);
-
-    if (bidsError) {
-      throw new Error(bidsError.message);
+    const bidsRes = await apiFetch<BidsResponse>(
+      `/api/admin/bids?item_ids=${encodeURIComponent(itemIds.join(","))}&limit=500`,
+      { method: "GET", token }
+    );
+    if (!bidsRes.ok) {
+      throw new Error(bidsRes.error ?? "Gagal memuat riwayat bid");
     }
-
-    bids = (bidsData ?? []) as unknown as BidExportRow[];
+    bids = bidsRes.data?.bids ?? [];
+    // Prefer actual bid list counts when available
+    const counted: Record<string, number> = {};
     for (const bid of bids) {
-      bidCounts[bid.item_id] = (bidCounts[bid.item_id] ?? 0) + 1;
+      counted[bid.item_id] = (counted[bid.item_id] ?? 0) + 1;
     }
-
-    for (const photo of photosData ?? []) {
-      const list = photosByItem.get(photo.item_id) ?? [];
-      if (list.length < MAX_PHOTOS_IN_EXPORT) {
-        list.push(photo.storage_path);
-        photosByItem.set(photo.item_id, list);
+    for (const id of itemIds) {
+      if (counted[id] != null) {
+        bidCounts[id] = counted[id];
       }
     }
   }
 
   let winners: WinnerRow[] = [];
   if (period.status === "finished" || period.status === "cancelled") {
-    const { data, error } = await supabase.rpc("get_period_winners", {
-      p_period_id: period.id,
-    });
-    if (error) {
-      throw new Error(error.message);
+    const winnersRes = await apiFetch<WinnersResponse>(
+      `/api/items/meta/period-winners/${period.id}`,
+      { method: "GET", token }
+    );
+    if (!winnersRes.ok) {
+      throw new Error(winnersRes.error ?? "Gagal memuat pemenang");
     }
-    winners = (data ?? []).filter((row) => itemIds.includes(row.item_id));
+    winners = (winnersRes.data?.winners ?? []).filter((row) =>
+      itemIds.includes(row.item_id)
+    );
   }
 
   const winnerByItem = new Map(winners.map((row) => [row.item_id, row]));
@@ -193,13 +225,12 @@ export async function fetchPeriodExportData(
 }
 
 export async function downloadPeriodExcel(
-  supabase: SupabaseClient<Database>,
   period: AuctionPeriod,
   category: string | null = null,
   options: PeriodExcelExportOptions = {}
 ) {
   const includeImages = options.includeImages !== false;
-  const data = await fetchPeriodExportData(supabase, period, category, {
+  const data = await fetchPeriodExportData(period, category, {
     includeImages,
   });
   const ExcelJS = (await import("exceljs")).default;

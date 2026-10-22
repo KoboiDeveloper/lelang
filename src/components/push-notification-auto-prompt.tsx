@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { usePathname } from "next/navigation";
 import { Bell, Loader2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { usePushNotifications } from "@/hooks/use-push-notifications";
@@ -12,9 +11,12 @@ import {
   isIosDevice,
   isStandalonePwa,
 } from "@/lib/push-client";
+import {
+  markPushPromptDismissed,
+  shouldAutoPromptPush,
+} from "@/lib/push-prompt-storage";
 
-const RESHOW_AFTER_DISMISS_MS = 8000;
-const PROMPT_DELAY_MS = 600;
+const PROMPT_DELAY_MS = 800;
 
 function isMobileViewport() {
   if (typeof window === "undefined") return false;
@@ -22,56 +24,47 @@ function isMobileViewport() {
 }
 
 export function PushNotificationAutoPrompt() {
-  const pathname = usePathname();
-  const { permission, needsOptIn, loading, ready, enableNotifications } = usePushNotifications();
+  const { permission, needsOptIn, loading, ready, enableNotifications } =
+    usePushNotifications();
   const [open, setOpen] = useState(false);
   const [mounted, setMounted] = useState(false);
   const [mobile, setMobile] = useState(false);
+  const [allowAuto, setAllowAuto] = useState(false);
 
   useEffect(() => {
     setMounted(true);
     setMobile(isMobileViewport());
+    setAllowAuto(shouldAutoPromptPush());
 
     const media = window.matchMedia("(max-width: 1023px)");
     const onChange = () => setMobile(media.matches);
     media.addEventListener("change", onChange);
-    return () => media.removeEventListener("change", onChange);
+
+    const onPushState = () => setAllowAuto(shouldAutoPromptPush());
+    window.addEventListener("elang-push-state-change", onPushState);
+
+    return () => {
+      media.removeEventListener("change", onChange);
+      window.removeEventListener("elang-push-state-change", onPushState);
+    };
   }, []);
 
-  function scheduleOpen(delay = PROMPT_DELAY_MS) {
-    if (!ready || !needsOptIn) return;
-    window.setTimeout(() => {
-      if (needsOptIn) setOpen(true);
-    }, delay);
-  }
-
   useEffect(() => {
-    if (!needsOptIn) {
+    if (!ready || !needsOptIn || !allowAuto) {
       setOpen(false);
       return;
     }
 
-    const timer = window.setTimeout(() => setOpen(true), PROMPT_DELAY_MS);
+    const timer = window.setTimeout(() => {
+      if (shouldAutoPromptPush()) setOpen(true);
+    }, PROMPT_DELAY_MS);
     return () => window.clearTimeout(timer);
-  }, [needsOptIn, pathname]);
-
-  useEffect(() => {
-    function onVisible() {
-      if (document.visibilityState !== "visible") return;
-      scheduleOpen(500);
-    }
-
-    document.addEventListener("visibilitychange", onVisible);
-    window.addEventListener("pageshow", onVisible);
-    return () => {
-      document.removeEventListener("visibilitychange", onVisible);
-      window.removeEventListener("pageshow", onVisible);
-    };
-  }, [needsOptIn, ready]);
+  }, [ready, needsOptIn, allowAuto]);
 
   function dismiss() {
+    markPushPromptDismissed();
+    setAllowAuto(false);
     setOpen(false);
-    window.setTimeout(() => scheduleOpen(0), RESHOW_AFTER_DISMISS_MS);
   }
 
   async function handleEnable() {
@@ -82,6 +75,7 @@ export function PushNotificationAutoPrompt() {
 
     const success = await enableNotifications();
     if (success) {
+      setAllowAuto(false);
       setOpen(false);
     }
   }
@@ -90,6 +84,7 @@ export function PushNotificationAutoPrompt() {
     return null;
   }
 
+  const showAutoUi = needsOptIn && allowAuto;
   const showIosHint = isIosDevice() && !isStandalonePwa();
   const iosOnly = showIosHint && !canEnablePushNotifications();
   const permissionGranted = permission === "granted";
@@ -98,12 +93,12 @@ export function PushNotificationAutoPrompt() {
     permission === "denied" ? (
       <div className="fixed bottom-0 left-0 right-0 z-[9998] border-t border-amber-200 bg-amber-50 px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] text-center text-xs text-amber-900">
         Notifikasi diblokir Chrome. Buka <strong>Site settings → Notifications → Allow</strong> untuk
-        lelang.amscorp.id
+        situs ini.
       </div>
     ) : null;
 
   const mobileBar =
-    needsOptIn && mobile && !open ? (
+    showAutoUi && mobile && !open ? (
       <div className="fixed bottom-0 left-0 right-0 z-[9998] border-t border-indigo-200 bg-white px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] shadow-[0_-8px_30px_rgba(0,0,0,0.08)]">
         <div className="mx-auto flex max-w-lg items-center gap-3">
           <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-indigo-50">
@@ -113,6 +108,15 @@ export function PushNotificationAutoPrompt() {
             <p className="text-sm font-medium text-slate-900">Aktifkan notifikasi lelang</p>
             <p className="truncate text-xs text-slate-500">AMS & AMV — sekali saja</p>
           </div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="shrink-0"
+            onClick={dismiss}
+          >
+            Nanti
+          </Button>
           <Button
             type="button"
             variant="primary"
@@ -128,7 +132,7 @@ export function PushNotificationAutoPrompt() {
     ) : null;
 
   const modal =
-    open && needsOptIn ? (
+    open && showAutoUi ? (
       <div className="fixed inset-0 z-[9999] flex items-end justify-center bg-black/50 p-4 pb-[max(1rem,env(safe-area-inset-bottom))] sm:items-center">
         <div
           role="dialog"
@@ -160,7 +164,8 @@ export function PushNotificationAutoPrompt() {
 
           {permissionGranted && (
             <p className="mt-3 rounded-xl bg-emerald-50 px-3 py-2 text-xs text-emerald-900">
-              Izin browser sudah aktif. Klik tombol di bawah untuk menyelesaikan pendaftaran notifikasi.
+              Izin browser sudah aktif. Klik tombol di bawah untuk menyelesaikan pendaftaran
+              notifikasi.
             </p>
           )}
 

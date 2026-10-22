@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import { createClient } from "@/lib/supabase/client";
 import { AuctionPeriod } from "@/lib/database.types";
 import { downloadPeriodExcel } from "@/lib/period-excel-export";
 import { Button } from "@/components/ui/button";
@@ -24,7 +23,6 @@ export function PeriodExportButton({
 }) {
   const [exporting, setExporting] = useState(false);
   const [imageMode, setImageMode] = useState<ExportImageMode>("with_images");
-  const supabase = createClient();
   const categoryLabel = !category || category === "all" ? "Semua" : category;
   const withImages = imageMode === "with_images";
 
@@ -45,7 +43,7 @@ export function PeriodExportButton({
           ? `Menyiapkan Excel + foto (${categoryLabel}), mohon tunggu...`
           : `Menyiapkan Excel tanpa foto (${categoryLabel})...`
       );
-      await downloadPeriodExcel(supabase, period, category, {
+      await downloadPeriodExcel(period, category, {
         includeImages: withImages,
       });
       toast.success(

@@ -1,11 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { createClient } from "@/lib/supabase/client";
+import { useCallback, useEffect, useState } from "react";
 import { useAdminCompanyId } from "@/components/admin/admin-company-context";
 import {
   fetchCompanyAssetTotals,
   fetchDashboardPeriods,
+  fetchDashboardStats,
   type CompanyAssetTotals,
   type DashboardPeriodSummary,
 } from "@/lib/admin-dashboard";
@@ -35,7 +35,6 @@ export function AdminDashboardClient({
   initialStats: DashboardStats;
 }) {
   const companyId = useAdminCompanyId();
-  const supabase = useMemo(() => createClient(), []);
   const [periodFilter, setPeriodFilter] = useState<string>("all");
   const [totals, setTotals] = useState(initialTotals);
   const [periods, setPeriods] = useState(initialPeriods);
@@ -43,53 +42,9 @@ export function AdminDashboardClient({
   const [loadingTotals, setLoadingTotals] = useState(false);
 
   const loadStats = useCallback(async () => {
-    const { data: companyPeriods } = await supabase
-      .from("auction_periods")
-      .select("id")
-      .eq("company_id", companyId);
-    const periodIds = (companyPeriods ?? []).map((period) => period.id);
-
-    const { data: companyBidders } = await supabase
-      .from("bidder_profiles")
-      .select("id")
-      .eq("company_id", companyId);
-    const bidderIds = (companyBidders ?? []).map((bidder) => bidder.id);
-
-    const [
-      { count: itemCount },
-      { count: bidCount },
-      { count: periodCount },
-      { count: bidderCount },
-    ] = await Promise.all([
-      periodIds.length
-        ? supabase
-            .from("auction_items")
-            .select("*", { count: "exact", head: true })
-            .in("period_id", periodIds)
-        : Promise.resolve({ count: 0 }),
-      bidderIds.length
-        ? supabase
-            .from("bids")
-            .select("*", { count: "exact", head: true })
-            .in("bidder_id", bidderIds)
-        : Promise.resolve({ count: 0 }),
-      supabase
-        .from("auction_periods")
-        .select("*", { count: "exact", head: true })
-        .eq("company_id", companyId),
-      supabase
-        .from("bidder_profiles")
-        .select("*", { count: "exact", head: true })
-        .eq("company_id", companyId),
-    ]);
-
-    setStats({
-      itemCount: itemCount ?? 0,
-      bidCount: bidCount ?? 0,
-      periodCount: periodCount ?? 0,
-      bidderCount: bidderCount ?? 0,
-    });
-  }, [supabase, companyId]);
+    const next = await fetchDashboardStats(companyId);
+    setStats(next);
+  }, [companyId]);
 
   useEffect(() => {
     setPeriodFilter("all");
@@ -103,8 +58,8 @@ export function AdminDashboardClient({
       setLoadingTotals(true);
       const nextPeriodId = periodFilter === "all" ? null : periodFilter;
       const [nextTotals, nextPeriods] = await Promise.all([
-        fetchCompanyAssetTotals(supabase, companyId, nextPeriodId),
-        fetchDashboardPeriods(supabase, companyId),
+        fetchCompanyAssetTotals(companyId, nextPeriodId),
+        fetchDashboardPeriods(companyId),
       ]);
       if (cancelled) return;
       setTotals(nextTotals);
@@ -116,7 +71,7 @@ export function AdminDashboardClient({
     return () => {
       cancelled = true;
     };
-  }, [supabase, companyId, periodFilter]);
+  }, [companyId, periodFilter]);
 
   const upcomingPeriods = periods.filter(
     (period) => period.status === "active" || period.status === "draft"

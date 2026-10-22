@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import Image from "next/image";
-import { createClient } from "@/lib/supabase/client";
+import { PhotoImage } from "@/components/photo-image";
+import { apiFetch, getClientToken } from "@/lib/api-client";
+import { getStoredUser } from "@/lib/session";
 import { PeriodExportButton } from "@/components/admin/period-export-button";
 import { AuctionItem, AuctionPeriod, ItemPhoto } from "@/lib/database.types";
 import { formatRupiah, formatNumberId, parseRupiahInput, getPhotoUrl } from "@/lib/format";
@@ -23,6 +24,11 @@ import { nextDuplicateItemName } from "@/lib/item-duplicate";
 import { fetchItemCategories } from "@/lib/item-categories";
 import type { ItemCategory } from "@/lib/database.types";
 import { CategoryFilter } from "@/components/category-filter";
+
+type ItemsPageResponse = {
+  items: { item: AuctionItem; photos: ItemPhoto[]; bidCount: number }[];
+  total: number;
+};
 
 type BidFilterKey = "all" | "no_bids" | "has_bids";
 
@@ -409,7 +415,7 @@ function ItemForm({
                     className="relative h-full w-full cursor-zoom-in"
                     aria-label={`Preview foto ${photoIndex + 1}`}
                   >
-                    <Image
+                    <PhotoImage
                       src={getPhotoUrl(photo.storage_path)}
                       alt=""
                       fill
@@ -499,7 +505,7 @@ function ItemRow({
     >
       <div className="relative h-14 w-14 shrink-0 overflow-hidden rounded-lg border border-[var(--border)] bg-slate-100 sm:h-16 sm:w-16">
         {thumbnailPath ? (
-          <Image
+          <PhotoImage
             src={getPhotoUrl(thumbnailPath)}
             alt={item.item_name}
             fill
@@ -621,78 +627,42 @@ export function PeriodItemsPanel({
   const [searchQuery, setSearchQuery] = useState("");
   const [sortKey, setSortKey] = useState<ItemSortKey>("lot");
   const [bidFilter, setBidFilter] = useState<BidFilterKey>("all");
-  const supabase = createClient();
 
   const canEditPricingRole = canEditPricing(userRole);
   const isFormOpen = addingNew || editingId !== null;
 
-  async function loadItemThumbnails(itemList: AuctionItem[]) {
-    const itemIds = itemList.map((item) => item.id);
-    if (itemIds.length === 0) {
-      setItemThumbnails({});
-      return;
-    }
-
-    const { data } = await supabase
-      .from("item_photos")
-      .select("item_id, storage_path, sort_order")
-      .in("item_id", itemIds)
-      .order("sort_order");
-
+  async function loadItems() {
+    const res = await apiFetch<ItemsPageResponse>(
+      `/api/items?period_id=${encodeURIComponent(periodId)}&offset=0&limit=1000`,
+      { method: "GET", token: getClientToken() }
+    );
+    const rows = res.data?.items ?? [];
+    const nextItems = rows.map((row) => row.item);
     const thumbnails: Record<string, string> = {};
-    for (const photo of data ?? []) {
-      if (!thumbnails[photo.item_id]) {
-        thumbnails[photo.item_id] = photo.storage_path;
+    const counts: Record<string, number> = {};
+    for (const row of rows) {
+      counts[row.item.id] = row.bidCount ?? 0;
+      const first = row.photos?.[0];
+      if (first?.storage_path) {
+        thumbnails[row.item.id] = first.storage_path;
       }
     }
+    setItems(nextItems);
     setItemThumbnails(thumbnails);
-  }
-
-  async function loadBidCounts(itemList: AuctionItem[]) {
-    const itemIds = itemList.map((item) => item.id);
-    if (itemIds.length === 0) {
-      setBidCountByItem({});
-      return;
-    }
-
-    const { data } = await supabase.rpc("get_item_bid_counts", {
-      p_item_ids: itemIds,
-    });
-
-    const counts: Record<string, number> = {};
-    for (const row of data ?? []) {
-      counts[row.item_id] = Number(row.bid_count ?? 0);
-    }
     setBidCountByItem(counts);
   }
 
-  async function loadItems() {
-    const { data } = await supabase
-      .from("auction_items")
-      .select("*")
-      .eq("period_id", periodId)
-      .order("lot_number");
-    const nextItems = data ?? [];
-    setItems(nextItems);
-    await Promise.all([
-      loadItemThumbnails(nextItems),
-      loadBidCounts(nextItems),
-    ]);
-  }
-
   async function refreshItemThumbnail(itemId: string) {
-    const { data } = await supabase
-      .from("item_photos")
-      .select("storage_path")
-      .eq("item_id", itemId)
-      .order("sort_order")
-      .limit(1)
-      .maybeSingle();
+    const res = await apiFetch<{ photos: ItemPhoto[] }>(`/api/items/${itemId}`, {
+      method: "GET",
+      token: getClientToken(),
+    });
+    const path = res.data?.photos?.[0]?.storage_path;
 
     setItemThumbnails((prev) => {
       const next = { ...prev };
-      if (data?.storage_path) {
-        next[itemId] = data.storage_path;
+      if (path) {
+        next[itemId] = path;
       } else {
         delete next[itemId];
       }
@@ -701,12 +671,11 @@ export function PeriodItemsPanel({
   }
 
   async function loadPhotos(itemId: string) {
-    const { data } = await supabase
-      .from("item_photos")
-      .select("*")
-      .eq("item_id", itemId)
-      .order("sort_order");
-    setPhotos(data ?? []);
+    const res = await apiFetch<{ photos: ItemPhoto[] }>(`/api/items/${itemId}`, {
+      method: "GET",
+      token: getClientToken(),
+    });
+    setPhotos(res.data?.photos ?? []);
   }
 
   useEffect(() => {
@@ -732,26 +701,15 @@ export function PeriodItemsPanel({
   }, [isFormOpen]);
 
   useEffect(() => {
-    fetchItemCategories(supabase)
+    fetchItemCategories()
       .then(setCategories)
       .catch(() => toast.error("Gagal memuat master kategori"));
-  }, [supabase]);
+  }, []);
 
   useEffect(() => {
-    async function loadRole() {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      if (!user) return;
-      const { data } = await supabase
-        .from("profiles")
-        .select("role")
-        .eq("id", user.id)
-        .maybeSingle();
-      setUserRole(data?.role ?? null);
-    }
-    loadRole();
-  }, [supabase]);
+    const stored = getStoredUser();
+    setUserRole(stored?.role ?? null);
+  }, []);
 
   useEffect(() => {
     if (editingId) {
@@ -779,14 +737,15 @@ export function PeriodItemsPanel({
   }
 
   async function allocateLotNumber(): Promise<string | null> {
-    const { data, error } = await supabase.rpc("allocate_next_lot_number", {
-      p_period_id: periodId,
-    });
-    if (error || !data) {
-      toast.error(error?.message ?? "Gagal mengambil nomor lot");
+    const res = await apiFetch<{ lot_number: string }>(
+      `/api/items/meta/next-lot/${periodId}`,
+      { method: "GET", token: getClientToken() }
+    );
+    if (!res.ok || !res.data?.lot_number) {
+      toast.error(res.error ?? "Gagal mengambil nomor lot");
       return null;
     }
-    return data;
+    return res.data.lot_number;
   }
 
   async function startAdd() {
@@ -852,47 +811,62 @@ export function PeriodItemsPanel({
           : new Date().toISOString()
         : null;
 
-      const { error } = await supabase
-        .from("auction_items")
-        .update(basePayload)
-        .eq("id", editingId);
+      const res = await apiFetch<{ item: AuctionItem }>(
+        `/api/items/${editingId}`,
+        {
+          method: "PATCH",
+          token: getClientToken(),
+          body: basePayload,
+        }
+      );
       setLoading(false);
-      if (error) {
-        toast.error(error.message);
+      if (!res.ok) {
+        toast.error(res.error ?? "Gagal memperbarui barang");
         return;
       }
       toast.success("Barang diperbarui");
       await loadItems();
       cancelForm();
     } else {
-      const { data, error } = await supabase.rpc("admin_create_auction_item", {
-        p_period_id: periodId,
-        p_item_name: form.item_name.trim(),
-        p_category: form.category.trim() || null,
-        p_description: form.description.trim(),
-        p_item_condition: form.item_condition.trim() || null,
-        p_status: form.status,
-        p_starting_price: canEditPricingRole ? startingPrice : 0,
-        p_bid_increment: canEditPricingRole ? bidIncrement : 1000,
+      const res = await apiFetch<{ item: AuctionItem }>("/api/items", {
+        method: "POST",
+        token: getClientToken(),
+        body: {
+          period_id: periodId,
+          item_name: form.item_name.trim(),
+          category: form.category.trim() || null,
+          description: form.description.trim(),
+          item_condition: form.item_condition.trim() || null,
+          status: form.status,
+          starting_price: canEditPricingRole ? startingPrice : 0,
+          bid_increment: canEditPricingRole ? bidIncrement : 1000,
+        },
       });
       setLoading(false);
-      if (error || !data) {
-        const message = error?.message?.includes("auction_item_lot_unique")
+      if (!res.ok || !res.data?.item) {
+        const message = res.error?.includes("lot")
           ? "Nomor lot bentrok, coba simpan lagi"
-          : error?.message ?? "Gagal menambah barang";
+          : res.error ?? "Gagal menambah barang";
         toast.error(message);
         return;
       }
 
+      let data = res.data.item;
+
       if (form.payment_confirmed) {
-        await supabase
-          .from("auction_items")
-          .update({
-            payment_confirmed: true,
-            payment_confirmed_at: new Date().toISOString(),
-          })
-          .eq("id", data.id);
-        data.payment_confirmed = true;
+        const payRes = await apiFetch<{ item: AuctionItem }>(
+          `/api/items/${data.id}`,
+          {
+            method: "PATCH",
+            token: getClientToken(),
+            body: {
+              payment_confirmed: true,
+              payment_confirmed_at: new Date().toISOString(),
+            },
+          }
+        );
+        if (payRes.data?.item) data = payRes.data.item;
+        else data = { ...data, payment_confirmed: true };
       }
       toast.success(
         `Barang ${data.lot_number} ditambahkan — tambahkan foto (maks. 5)`
@@ -927,28 +901,28 @@ export function PeriodItemsPanel({
       return;
     }
 
-    const path = `${editingId}/${Date.now()}.jpg`;
-
-    const { error: uploadError } = await supabase.storage
-      .from("auction-photos")
-      .upload(path, uploadFile);
-
-    if (uploadError) {
+    const token = getClientToken();
+    if (!token) {
       setUploading(false);
-      toast.error(uploadError.message);
+      toast.error("Sesi berakhir. Silakan login ulang.");
       return;
     }
 
-    const { error: dbError } = await supabase.from("item_photos").insert({
-      item_id: editingId,
-      storage_path: path,
-      sort_order: photos.length + 1,
+    const formData = new FormData();
+    formData.append("file", uploadFile, uploadFile.name || "photo.jpg");
+    formData.append("item_id", editingId);
+    formData.append("sort_order", String(photos.length + 1));
+
+    const res = await apiFetch("/api/files/upload", {
+      method: "POST",
+      token,
+      formData,
     });
 
     setUploading(false);
 
-    if (dbError) {
-      toast.error(dbError.message);
+    if (!res.ok) {
+      toast.error(res.error ?? "Gagal upload foto");
       return;
     }
 
@@ -960,14 +934,20 @@ export function PeriodItemsPanel({
   async function handlePhotoDelete(photo: ItemPhoto) {
     if (!editingId) return;
 
-    await supabase.storage.from("auction-photos").remove([photo.storage_path]);
-    const { error } = await supabase
-      .from("item_photos")
-      .delete()
-      .eq("id", photo.id);
+    const token = getClientToken();
+    if (!token) {
+      toast.error("Sesi berakhir. Silakan login ulang.");
+      return;
+    }
 
-    if (error) {
-      toast.error(error.message);
+    const res = await apiFetch("/api/files", {
+      method: "DELETE",
+      token,
+      body: { path: photo.storage_path, photo_id: photo.id },
+    });
+
+    if (!res.ok) {
+      toast.error(res.error ?? "Gagal menghapus foto");
       return;
     }
 
@@ -985,43 +965,51 @@ export function PeriodItemsPanel({
     setDuplicatingId(item.id);
 
     try {
-      const { data: created, error } = await supabase.rpc("admin_create_auction_item", {
-        p_period_id: periodId,
-        p_item_name: nextDuplicateItemName(item.item_name),
-        p_category: item.category,
-        p_description: item.description,
-        p_item_condition: item.item_condition,
-        p_status: "draft",
-        p_starting_price: item.starting_price,
-        p_bid_increment: item.bid_increment,
+      const createRes = await apiFetch<{ item: AuctionItem }>("/api/items", {
+        method: "POST",
+        token: getClientToken(),
+        body: {
+          period_id: periodId,
+          item_name: nextDuplicateItemName(item.item_name),
+          category: item.category,
+          description: item.description,
+          item_condition: item.item_condition,
+          status: "draft",
+          starting_price: item.starting_price,
+          bid_increment: item.bid_increment,
+        },
       });
 
-      if (error || !created) {
-        toast.error(error?.message ?? "Gagal menduplikasi barang");
+      if (!createRes.ok || !createRes.data?.item) {
+        toast.error(createRes.error ?? "Gagal menduplikasi barang");
         return;
       }
 
-      const { data: sourcePhotos } = await supabase
-        .from("item_photos")
-        .select("*")
-        .eq("item_id", item.id)
-        .order("sort_order");
+      const created = createRes.data.item;
+      const sourceRes = await apiFetch<{ photos: ItemPhoto[] }>(
+        `/api/items/${item.id}`,
+        { method: "GET", token: getClientToken() }
+      );
+      const token = getClientToken();
 
-      for (const photo of sourcePhotos ?? []) {
+      for (const photo of sourceRes.data?.photos ?? []) {
         try {
           const response = await fetch(getPhotoUrl(photo.storage_path));
-          if (!response.ok) continue;
+          if (!response.ok || !token) continue;
           const blob = await response.blob();
-          const path = `${created.id}/${Date.now()}-${photo.sort_order}.jpg`;
-          const { error: uploadError } = await supabase.storage
-            .from("auction-photos")
-            .upload(path, blob, { contentType: blob.type || "image/jpeg" });
-          if (uploadError) continue;
-
-          await supabase.from("item_photos").insert({
-            item_id: created.id,
-            storage_path: path,
-            sort_order: photo.sort_order,
+          const formData = new FormData();
+          formData.append(
+            "file",
+            new File([blob], `photo-${photo.sort_order}.jpg`, {
+              type: blob.type || "image/jpeg",
+            })
+          );
+          formData.append("item_id", created.id);
+          formData.append("sort_order", String(photo.sort_order));
+          await apiFetch("/api/files/upload", {
+            method: "POST",
+            token,
+            formData,
           });
         } catch {
           // Skip photo copy failures; item itself already created.
@@ -1042,27 +1030,30 @@ export function PeriodItemsPanel({
 
     setDeleting(true);
 
-    const { data: itemPhotos } = await supabase
-      .from("item_photos")
-      .select("storage_path")
-      .eq("item_id", deleteTarget.id);
-
-    if (itemPhotos?.length) {
-      await supabase.storage
-        .from("auction-photos")
-        .remove(itemPhotos.map((photo) => photo.storage_path));
+    const detail = await apiFetch<{ photos: ItemPhoto[] }>(
+      `/api/items/${deleteTarget.id}`,
+      { method: "GET", token: getClientToken() }
+    );
+    const token = getClientToken();
+    for (const photo of detail.data?.photos ?? []) {
+      if (!token) break;
+      await apiFetch("/api/files", {
+        method: "DELETE",
+        token,
+        body: { path: photo.storage_path, photo_id: photo.id },
+      });
     }
 
-    const { error } = await supabase
-      .from("auction_items")
-      .delete()
-      .eq("id", deleteTarget.id);
+    const res = await apiFetch(`/api/items/${deleteTarget.id}`, {
+      method: "DELETE",
+      token: getClientToken(),
+    });
 
     setDeleting(false);
     setDeleteTarget(null);
 
-    if (error) {
-      toast.error(error.message);
+    if (!res.ok) {
+      toast.error(res.error ?? "Gagal menghapus barang");
       return;
     }
 

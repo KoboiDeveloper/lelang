@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
 import { Gavel, Menu } from "lucide-react";
@@ -8,7 +8,13 @@ import { NavbarAuth } from "@/components/navbar-auth";
 import { MobileNavDrawer } from "@/components/mobile-nav-drawer";
 import { PushNotificationPrompt } from "@/components/push-notification-prompt";
 import { FavoritesMenu } from "@/components/favorites-menu";
-import { createClient } from "@/lib/supabase/client";
+import {
+  fetchMe,
+  getStoredUser,
+  getToken,
+  onAuthChange,
+  sessionUserToProfile,
+} from "@/lib/session";
 import { Profile } from "@/lib/database.types";
 import { cn } from "@/lib/utils";
 
@@ -46,7 +52,6 @@ function NavbarContent() {
   const [profile, setProfile] = useState<Profile | null>(null);
   const pathname = usePathname();
   const searchParams = useSearchParams();
-  const supabase = useMemo(() => createClient(), []);
 
   const companyQuery = searchParams.get("company");
   const withCompany = (href: string) =>
@@ -54,24 +59,21 @@ function NavbarContent() {
 
   useEffect(() => {
     async function load() {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      if (!user) {
+      const token = getToken();
+      if (!token) {
         setProfile(null);
         return;
       }
-      const { data } = await supabase
-        .from("profiles")
-        .select("*")
-        .eq("id", user.id)
-        .maybeSingle();
-      setProfile(data);
+      const stored = getStoredUser();
+      if (stored) setProfile(sessionUserToProfile(stored));
+      const user = await fetchMe(token);
+      setProfile(user ? sessionUserToProfile(user) : null);
     }
-    load();
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(() => load());
-    return () => subscription.unsubscribe();
-  }, [supabase]);
+    void load();
+    return onAuthChange(() => {
+      void load();
+    });
+  }, []);
 
   useEffect(() => {
     setMobileOpen(false);
